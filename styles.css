@@ -606,3 +606,11 @@ main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni
   .ev-title { white-space: normal; }
   .now-focus h2 { font-size: 22px; }
 }
+
+/* ---------- Legenda dei colori ---------- */
+.legend { list-style: none; margin: 0; padding: 0 10px; display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+.legend li { display: flex; align-items: center; gap: 8px; }
+.legend li::before { content: ''; width: 12px; height: 12px; border-radius: 3px; background: var(--c); flex-shrink: 0; }
+@media (max-width: 800px) {
+  .legend { flex-direction: row; flex-wrap: wrap; gap: 4px 12px; padding: 0 4px; }
+}

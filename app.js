@@ -14,7 +14,7 @@ const STORAGE_KEY = 'agenda-servizio-v1';
 //   offset = quanti giorni prima dell'impegno · when = blocco della giornata · heavy = lavoro impegnativo
 // I passi che cadrebbero di domenica vengono anticipati al sabato (la domenica resta libera da responsabilità).
 const DEFAULT_TEMPLATES = {
-  predica: { label: 'Predica', icon: '🎤', color: '#5b4bb7', steps: [
+  predica: { label: 'Predica', icon: '🎤', color: '#D32F2F', steps: [
     { label: 'Il brano non è ancora nel foglio: chiedilo ai responsabili', offset: 9, when: 'sera', ifMissing: true },
     { label: 'Scegliere il brano (la predica è a tema libero)', offset: 9, when: 'mattina', ifFree: true },
     { label: 'Lettura del brano e prime osservazioni', offset: 8, when: 'mattina' },
@@ -29,19 +29,19 @@ const DEFAULT_TEMPLATES = {
     { label: 'Preparare il PowerPoint', offset: 1, when: 'mattina' },
     { label: 'Ripetizione ad alta voce, almeno due volte', offset: 1, when: 'pomeriggio', heavy: true },
   ]},
-  presidenza: { label: 'Presidenza', icon: '📋', color: '#0f7c80', steps: [
+  presidenza: { label: 'Presidenza', icon: '📋', color: '#2F78C4', steps: [
     { label: 'Scegliere i canti (10 minuti)', offset: 3, when: 'sera' },
     { label: 'Rivedere canti e ordine del culto (10 minuti)', offset: 2, when: 'sera' },
   ]},
   // time = orario abituale: occupa tutta la sera (l'incontro finisce tardi)
-  giovanissimi: { label: 'Giovanissimi', icon: '🧒', color: '#c46a1b', time: '19:30', steps: [
+  giovanissimi: { label: 'Giovanissimi', icon: '🧒', color: '#A12FB5', time: '19:30', steps: [
     { label: 'Leggere il brano e le domande', offset: 5, when: 'sera' },
     { label: 'Studio del brano — giorno 1 di 2', offset: 4, when: 'mattina', heavy: true },
     { label: 'Studio del brano — giorno 2 di 2', offset: 3, when: 'mattina', heavy: true },
     { label: 'Preparare lo studio: schema e punti principali', offset: 2, when: 'mattina', heavy: true },
     { label: 'Ripasso dello studio (e rompighiaccio, se serve)', offset: 1, when: 'sera' },
   ]},
-  chiesa: { label: 'Chiesa in casa', icon: '🏠', color: '#3d7a3a', time: '19:30', steps: [
+  chiesa: { label: 'Chiesa in casa', icon: '🏠', color: '#2E7D4F', time: '19:30', steps: [
     { label: 'Scegliere brano o tema', offset: 5, when: 'sera', ifMissing: true },
     { label: 'Studio del brano — giorno 1 di 2', offset: 4, when: 'mattina', heavy: true },
     { label: 'Studio del brano — giorno 2 di 2', offset: 3, when: 'mattina', heavy: true },
@@ -57,7 +57,7 @@ const DEFAULT_SETTINGS = {
   lastSync: null,
 };
 
-const STUDY_COLOR = '#8a5a00';
+const STUDY_COLOR = '#9E6C00';
 const UNITS = {
   pagine: ['pagina', 'pagine'],
   capitoli: ['capitolo', 'capitoli'],
@@ -99,7 +99,7 @@ function normalize(s) {
 }
 
 // Aggiornamenti dei dati tra una versione e l'altra (girano anche sul sito, dove seed.js non c'è).
-const SCHEMA = 4;
+const SCHEMA = 5;
 function migrate() {
   const t = today();
   if (state.schema < 3) {
@@ -113,6 +113,16 @@ function migrate() {
   if (state.schema < 4) {
     // v4: chiesa in casa e giovanissimi hanno un orario abituale, che occupa la sera
     for (const ev of state.events) if (!ev.time && ev.date >= t && tpl(ev.type).time) ev.time = tpl(ev.type).time;
+  }
+  if (state.schema < 5) {
+    // v5: benvenuto e feste dei giovanissimi erano "Altro": diventano Giovanissimi (stesso colore), senza preparazione
+    for (const ev of state.events) {
+      if (ev.type === 'altro' && ev.seedKey && ev.seedKey.startsWith('seed:giov:')) {
+        ev.type = 'giovanissimi';
+        ev.noPrep = true;
+        ev.title = ev.title.replace(/^Giovanissimi · /, '');
+      }
+    }
   }
   state.schema = SCHEMA;
 }
@@ -829,7 +839,17 @@ let weekOffset = 0;
 let calCursor = (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); })();
 const main = document.getElementById('main');
 
+// Colori degli impegni: distribuiti su tutto il cerchio cromatico, il più forte (rosso) alla predica.
+function renderLegend() {
+  const el = document.getElementById('legend');
+  if (!el) return;
+  const items = Object.values(state.templates).filter(t => t !== state.templates.altro)
+    .map(t => [t.color, `${t.icon} ${t.label}`]).concat([[STUDY_COLOR, '📖 Studio personale']]);
+  el.innerHTML = items.map(([c, l]) => `<li style="--c:${c}">${esc(l)}</li>`).join('');
+}
+
 function render() {
+  renderLegend();
   document.querySelectorAll('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   main.dataset.view = view;
   main.innerHTML = VIEWS[view]();
@@ -1622,13 +1642,10 @@ function applySeed() {
       ...(m.questions.length ? ['Domande per il gruppo (facoltative):', ...m.questions] : []),
       ...(m.links.length ? ['', 'Link:', ...m.links] : []),
     ].join('\n');
-    const ev = createEvent({
-      type: isStudy ? 'giovanissimi' : 'altro',
-      date: m.date, time: m.time, passage: m.passage, notes,
-      title: isStudy ? m.title : `Giovanissimi · ${m.title}`,
-    });
+    const ev = createEvent({ type: 'giovanissimi', date: m.date, time: m.time, passage: m.passage, notes, title: m.title });
     ev.seedKey = key;
     if (isStudy) setMine(ev, false);
+    else { ev.noPrep = true; ev.steps = []; } // benvenuto e feste: nessuna preparazione
   }
 
   if (!state.studies.some(p => p.seedKey === 'seed:wright')) {
@@ -1762,7 +1779,7 @@ function openEventDetail(id) {
           ${ev.passage && ev.passage !== ev.title ? `<p class="detail-passage">📖 ${esc(ev.passage)}</p>` : ''}
           ${ev.info ? `<p class="muted">${esc(ev.info)}</p>` : ''}
           ${ev.sheetMissing ? '<p class="ev-warn">⚠️ Questo impegno non risulta più nel foglio delle prediche: forse è stato spostato o riassegnato.</p>' : ''}
-          ${ev.type === 'giovanissimi' ? `<label class="mine-toggle"><input type="checkbox" data-mine ${ev.notMine ? '' : 'checked'}> Lo guido io (crea la tabella di marcia)</label>` : ''}
+          ${ev.type === 'giovanissimi' && !ev.noPrep ? `<label class="mine-toggle"><input type="checkbox" data-mine ${ev.notMine ? '' : 'checked'}> Lo guido io (crea la tabella di marcia)</label>` : ''}
         </div>
         ${healthBadge(eventHealth(ev))}
       </div>
@@ -1834,7 +1851,7 @@ function openEventDetail(id) {
 
 function openGiovChooser() {
   const t = today();
-  const list = state.events.filter(e => e.type === 'giovanissimi' && e.seedKey && e.date >= t).sort(byDate);
+  const list = state.events.filter(e => e.type === 'giovanissimi' && e.seedKey && !e.noPrep && e.date >= t).sort(byDate);
   openModal(`
     <form class="form">
       <h2>Quali incontri guidi tu?</h2>
