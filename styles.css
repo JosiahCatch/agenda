@@ -673,3 +673,8 @@ main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni
 
 /* ---------- Pulsante del tema ---------- */
 .theme-toggle { background: transparent; border-color: var(--line-strong); font-size: 13.5px; }
+
+/* QR per collegare il telefono */
+.share { max-width: 420px; }
+.share .qr { width: 280px; max-width: 100%; margin: 16px auto; }
+.share .qr svg { display: block; width: 100%; height: auto; border-radius: 8px; }

@@ -289,6 +289,52 @@ async function cloudConnect(token, repo) {
   }
 }
 
+// Collegare un altro dispositivo senza un'altra chiave: il PC mostra un QR con un link che contiene
+// la chiave dopo il "#" (quella parte resta nel browser e non viene mai inviata al sito).
+const SITE_URL = 'https://josiahcatch.github.io/agenda/';
+const LINK_KEY = 'collega=';
+
+function loadScript(src) {
+  return new Promise((ok, ko) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => ko(new Error(`non riesco a caricare ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+async function openCloudShare() {
+  if (!window.qrcode) await loadScript('qrcode.js');
+  const base = location.hostname.endsWith('github.io') ? location.origin + location.pathname : SITE_URL;
+  const link = `${base}#${LINK_KEY}${btoa(JSON.stringify({ t: cloud.cfg.token, r: cloud.cfg.repo }))}`;
+  const qr = qrcode(0, 'L');
+  qr.addData(link);
+  qr.make();
+  openModal(`
+    <div class="share">
+      <h2>📱 Collega il telefono</h2>
+      <p>Inquadra il codice con la fotocamera del telefono e apri il link: l'agenda si collega da sola
+        e resta collegata. Non dovrai farlo più.</p>
+      <div class="qr">${qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true })}</div>
+      <p class="muted">Il codice contiene la tua chiave: non fotografarlo e non mandarlo a nessuno.</p>
+      <div class="btn-row"><button class="primary" data-close>Fatto</button></div>
+    </div>`);
+}
+
+// All'avvio: se il link arriva dal QR, salva la chiave e la toglie subito dall'indirizzo.
+function takeLinkFromUrl() {
+  if (!location.hash.startsWith(`#${LINK_KEY}`)) return null;
+  const raw = location.hash.slice(LINK_KEY.length + 1);
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    const { t, r } = JSON.parse(atob(decodeURIComponent(raw)));
+    return t ? { token: t, repo: r || DEFAULT_REPO } : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function cloudDisconnect() {
   if (!confirm('Scollegare questo dispositivo? I dati restano qui e sul cloud, ma non si sincronizzano più.')) return;
   localStorage.removeItem(CLOUD_KEY);
@@ -1353,11 +1399,16 @@ function viewImpostazioni() {
         <div class="settings-form">
           <p>✅ Collegato a <strong>${esc(cloud.cfg.repo)}</strong> (repository privato). Ogni modifica viene salvata lì
             e ritrovata su tutti i dispositivi collegati.</p>
-          <div class="btn-row"><button data-action="cloud-disconnect">Scollega questo dispositivo</button></div>
+          <div class="btn-row">
+            <button class="primary" data-action="cloud-share">📱 Collega il telefono</button>
+            <button data-action="cloud-disconnect">Scollega questo dispositivo</button>
+          </div>
         </div>` : `
         <form class="form settings-form" id="cloud-form">
           <p class="muted">Collega questo dispositivo e i tuoi dati saranno uguali su PC, telefono e ovunque apri l'agenda.
             Va fatto <strong>una volta sola per dispositivo</strong>.</p>
+          <p>📱 <strong>Hai già collegato il PC?</strong> Non serve un'altra chiave: sul PC apri Impostazioni →
+            <em>Collega il telefono</em> e inquadra il codice con la fotocamera.</p>
           <ol class="howto">
             <li>Apri <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">questa pagina di GitHub</a> (crea una chiave).</li>
             <li><em>Token name</em>: <code>agenda</code> · <em>Expiration</em>: la più lunga che ti propone.</li>
@@ -2241,6 +2292,9 @@ document.addEventListener('click', e => {
       break;
     case 'giov-choose': openGiovChooser(); break;
     case 'cloud-disconnect': cloudDisconnect(); break;
+    case 'cloud-share':
+      openCloudShare().catch(err => alert(`Non riesco a creare il codice: ${err.message}.`));
+      break;
     case 'toggle-theme': {
       const theme = currentTheme() === 'dark' ? 'light' : 'dark';
       localStorage.setItem(THEME_KEY, theme);
@@ -2362,6 +2416,7 @@ window.addEventListener('focus', () => {
 /* ---------- Avvio ---------- */
 
 async function boot() {
+  const linked = takeLinkFromUrl();
   state = loadLocal();
   if (location.protocol.startsWith('http')) {
     try {
@@ -2379,6 +2434,7 @@ async function boot() {
   rebalanceAll();
   save();
   render();
+  if (linked && !cloud.cfg) await cloudConnect(linked.token, linked.repo);
   syncSheet({ silent: true });
 }
 

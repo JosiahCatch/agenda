@@ -15,7 +15,7 @@ const ROOT = __dirname;
 const DATA = path.join(ROOT, 'dati.json');
 const BACKUP_DIR = path.join(ROOT, 'backup');
 const KEEP_BACKUPS = 30;
-const STATIC = new Set(['/index.html', '/app.js', '/styles.css', '/seed.js']);
+const STATIC = new Set(['/index.html', '/app.js', '/styles.css', '/seed.js', '/qrcode.js']);
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 
 function dailyBackup() {
