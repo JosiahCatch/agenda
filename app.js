@@ -92,6 +92,7 @@ function normalize(s) {
     habitStart: s.habitStart || null,
     sessions: s.sessions || [],
     lastBackup: s.lastBackup || null,
+    updatedAt: s.updatedAt || null,
   };
 }
 
@@ -127,12 +128,157 @@ function pushServer() {
     .catch(e => { console.error(e); toast('⚠️ Non riesco a salvare su file: l\'agenda è stata chiusa?'); });
 }
 
+// "Istantanea" dei dati senza la data di modifica: serve a capire se è cambiato davvero qualcosa.
+const snapshotOf = st => JSON.stringify({ ...st, updatedAt: null });
+let lastSnap = null;
+
 function save() {
+  const snap = snapshotOf(state);
+  if (snap !== lastSnap) {
+    state.updatedAt = new Date().toISOString();
+    lastSnap = snap;
+  }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   if (serverMode) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(pushServer, 400);
   }
+  if (cloud.cfg && snap !== cloud.snap) {
+    clearTimeout(cloud.timer);
+    cloud.timer = setTimeout(cloudPush, 1500);
+  }
+}
+
+/* ---------- Sincronizzazione tra dispositivi (repository privato su GitHub) ----------
+   I dati stanno in dati.json di un repository privato. La chiave (token) resta solo in
+   questo browser e non finisce mai nei backup. */
+
+const CLOUD_KEY = 'agenda-cloud';
+const DEFAULT_REPO = 'JosiahCatch/agenda-dati';
+const cloud = {
+  cfg: (() => { try { return JSON.parse(localStorage.getItem(CLOUD_KEY)); } catch (e) { return null; } })(),
+  sha: null, snap: null, timer: null, busy: false, status: '', at: null,
+};
+
+const b64enc = str => {
+  let bin = '';
+  new TextEncoder().encode(str).forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+};
+const b64dec = b64 => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\s/g, '')), c => c.charCodeAt(0)));
+
+function cloudRequest(method, body) {
+  return fetch(`https://api.github.com/repos/${cloud.cfg.repo}/contents/dati.json${method === 'GET' ? `?t=${Date.now()}` : ''}`, {
+    method,
+    cache: 'no-store',
+    headers: { Authorization: `Bearer ${cloud.cfg.token}`, Accept: 'application/vnd.github+json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function cloudPull() {
+  const r = await cloudRequest('GET');
+  if (r.status === 404) { cloud.sha = null; return null; }
+  if (r.status === 401 || r.status === 403) throw new Error('chiave non valida o senza permessi');
+  if (!r.ok) throw new Error(`GitHub ha risposto ${r.status}`);
+  const j = await r.json();
+  cloud.sha = j.sha;
+  return JSON.parse(b64dec(j.content));
+}
+
+function adoptRemote(remote) {
+  state = normalize(remote);
+  migrate();
+  rebalanceAll();
+  lastSnap = cloud.snap = snapshotOf(state);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function setCloudStatus(status) {
+  cloud.status = status;
+  if (status === 'ok') cloud.at = new Date();
+  renderSyncStatus();
+}
+
+async function cloudPush() {
+  cloud.timer = null;
+  if (!cloud.cfg || cloud.busy) return;
+  cloud.busy = true;
+  setCloudStatus('saving');
+  try {
+    const snap = snapshotOf(state);
+    let r = await cloudRequest('PUT', { message: 'Aggiornamento agenda', content: b64enc(JSON.stringify(state)), ...(cloud.sha ? { sha: cloud.sha } : {}) });
+    if (r.status === 409 || r.status === 422) {
+      // Qualcun altro (un altro dispositivo) ha salvato nel frattempo: vince la versione più recente.
+      const remote = await cloudPull();
+      if (remote && (remote.updatedAt || '') > (state.updatedAt || '')) {
+        adoptRemote(remote);
+        render();
+        toast('Agenda aggiornata con le modifiche dell\'altro dispositivo');
+        setCloudStatus('ok');
+        return;
+      }
+      r = await cloudRequest('PUT', { message: 'Aggiornamento agenda', content: b64enc(JSON.stringify(state)), ...(cloud.sha ? { sha: cloud.sha } : {}) });
+    }
+    if (!r.ok) throw new Error(`GitHub ha risposto ${r.status}`);
+    cloud.sha = (await r.json()).content.sha;
+    cloud.snap = snap;
+    setCloudStatus('ok');
+  } catch (e) {
+    console.error(e);
+    setCloudStatus('error');
+  } finally {
+    cloud.busy = false;
+    if (cloud.cfg && snapshotOf(state) !== cloud.snap && !cloud.timer) cloud.timer = setTimeout(cloudPush, 1500);
+  }
+}
+
+// All'avvio e quando torni sulla finestra: se sul cloud c'è una versione più recente, la usa.
+async function cloudRefresh({ initial = false } = {}) {
+  if (!cloud.cfg || cloud.busy || cloud.timer) return;
+  try {
+    const remote = await cloudPull();
+    if (!remote) { cloud.snap = null; return; }
+    if ((remote.updatedAt || '') > (state.updatedAt || '') || initial && !state.updatedAt) {
+      adoptRemote(remote);
+      if (!initial) { render(); toast('Agenda aggiornata dall\'altro dispositivo'); }
+    } else if (snapshotOf(remote) === snapshotOf(state)) {
+      cloud.snap = snapshotOf(state);
+    }
+    setCloudStatus('ok');
+  } catch (e) {
+    console.error(e);
+    setCloudStatus('error');
+  }
+}
+
+async function cloudConnect(token, repo) {
+  cloud.cfg = { token: token.trim(), repo: repo.trim() || DEFAULT_REPO };
+  try {
+    const remote = await cloudPull();
+    const hasLocal = state.events.length || state.studies.length;
+    if (remote && (!hasLocal || confirm(`Sul cloud ci sono già dei dati (aggiornati ${remote.updatedAt ? new Date(remote.updatedAt).toLocaleString('it-IT', { dateStyle: 'medium', timeStyle: 'short' }) : 'in passato'}).\n\nOK = usa quelli (consigliato)\nAnnulla = sostituiscili con i dati di questo dispositivo`))) {
+      adoptRemote(remote);
+    } else {
+      cloud.snap = null;
+    }
+    localStorage.setItem(CLOUD_KEY, JSON.stringify(cloud.cfg));
+    save();
+    render();
+    setCloudStatus('ok');
+    toast('Sincronizzazione attiva ☁️');
+  } catch (e) {
+    cloud.cfg = null;
+    alert(`Non riesco a collegarmi: ${e.message}.\nControlla la chiave e che abbia accesso al repository ${repo || DEFAULT_REPO} (Contents: lettura e scrittura).`);
+  }
+}
+
+function cloudDisconnect() {
+  if (!confirm('Scollegare questo dispositivo? I dati restano qui e sul cloud, ma non si sincronizzano più.')) return;
+  localStorage.removeItem(CLOUD_KEY);
+  cloud.cfg = null;
+  cloud.status = '';
+  render();
 }
 
 window.addEventListener('beforeunload', () => {
@@ -739,9 +885,9 @@ function viewSettimana() {
     ${giovToChoose ? `<div class="banner">🧒 <span><strong>Giovanissimi:</strong> quali incontri guidi tu? La preparazione partirà solo per quelli.</span>
       <button class="primary" data-action="giov-choose">Scegli i tuoi incontri</button></div>` : ''}
 
-    ${!serverMode && !nothingAtAll && (!state.lastBackup || diffDays(state.lastBackup, t) > 14) ? `<div class="banner">💾
-      <span>I dati di quest'agenda sono salvati in questo browser: scarica un backup ogni tanto.</span>
-      <button data-action="export">Scarica backup</button></div>` : ''}
+    ${!serverMode && !cloud.cfg ? `<div class="banner">☁️
+      <span>I dati sono solo in questo browser. Attiva la sincronizzazione per averli uguali su tutti i dispositivi.</span>
+      <button class="primary" data-action="nav" data-view="impostazioni">Attiva</button></div>` : ''}
 
     ${!state.settings.sheetUrl && location.protocol !== 'file:' ? `<div class="banner">🎤
       <span>Collega il foglio delle prediche: le tue prediche e presidenze arriveranno da sole.</span>
@@ -1101,6 +1247,32 @@ function viewImpostazioni() {
     </header>
 
     <section class="section">
+      <h2>☁️ Sincronizzazione tra dispositivi</h2>
+      ${cloud.cfg ? `
+        <div class="settings-form">
+          <p>✅ Collegato a <strong>${esc(cloud.cfg.repo)}</strong> (repository privato). Ogni modifica viene salvata lì
+            e ritrovata su tutti i dispositivi collegati.</p>
+          <div class="btn-row"><button data-action="cloud-disconnect">Scollega questo dispositivo</button></div>
+        </div>` : `
+        <form class="form settings-form" id="cloud-form">
+          <p class="muted">Collega questo dispositivo e i tuoi dati saranno uguali su PC, telefono e ovunque apri l'agenda.
+            Va fatto <strong>una volta sola per dispositivo</strong>.</p>
+          <ol class="howto">
+            <li>Apri <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">questa pagina di GitHub</a> (crea una chiave).</li>
+            <li><em>Token name</em>: <code>agenda</code> · <em>Expiration</em>: la più lunga che ti propone.</li>
+            <li><em>Repository access</em>: <strong>Only select repositories</strong> → scegli <code>agenda-dati</code>.</li>
+            <li><em>Permissions</em> → <em>Repository permissions</em> → <strong>Contents: Read and write</strong>.</li>
+            <li>Clicca <strong>Generate token</strong>, copia la chiave (inizia con <code>github_pat_</code>) e incollala qui sotto.</li>
+          </ol>
+          <div class="field-row">
+            <label class="field grow2"><span>Chiave</span><input name="token" type="password" placeholder="github_pat_…" autocomplete="off" required></label>
+            <label class="field"><span>Repository</span><input name="repo" value="${DEFAULT_REPO}"></label>
+          </div>
+          <div class="btn-row"><button class="primary">Collega</button></div>
+        </form>`}
+    </section>
+
+    <section class="section">
       <h2>Foglio delle prediche</h2>
       <p class="muted">L'agenda legge il foglio a ogni avvio: le righe in cui compare il tuo nome nella colonna
         <em>Predica</em> o <em>Presiede</em> diventano impegni, con la loro tabella di marcia.</p>
@@ -1212,10 +1384,18 @@ const VIEWS = {
 function renderSyncStatus() {
   const el = document.getElementById('sync-status');
   if (!el) return;
-  if (location.protocol === 'file:' || !state.settings.sheetUrl) { el.innerHTML = ''; return; }
-  const last = state.settings.lastSync;
-  el.innerHTML = `<button class="link" data-action="sync" title="Rileggi il foglio delle prediche">↻ Foglio prediche</button>
-    <small>${syncing ? 'aggiornamento…' : last ? `aggiornato ${new Date(last).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })}` : 'mai aggiornato'}</small>`;
+  const hm = d => new Date(d).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+  let html = '';
+  if (location.protocol !== 'file:' && state.settings.sheetUrl) {
+    const last = state.settings.lastSync;
+    html += `<button class="link" data-action="sync" title="Rileggi il foglio delle prediche">↻ Foglio prediche</button>
+      <small>${syncing ? 'aggiornamento…' : last ? `aggiornato ${hm(last)}` : 'mai aggiornato'}</small>`;
+  }
+  if (cloud.cfg) {
+    const st = { saving: 'salvataggio…', error: '⚠️ non sincronizzato', ok: cloud.at ? `sincronizzato ${hm(cloud.at)}` : 'sincronizzato' }[cloud.status] || 'collegamento…';
+    html += `<button class="link" data-action="nav" data-view="impostazioni" title="Sincronizzazione tra dispositivi">☁️ Cloud</button><small>${st}</small>`;
+  }
+  el.innerHTML = html;
 }
 
 /* ---------- Foglio Google delle prediche ---------- */
@@ -1956,6 +2136,7 @@ document.addEventListener('click', e => {
       save(); render(); toast('Settimana pianificata. Ora un passo alla volta 💪');
       break;
     case 'giov-choose': openGiovChooser(); break;
+    case 'cloud-disconnect': cloudDisconnect(); break;
     case 'focus-start': {
       const x = taskFromRef(el);
       if (x) openFocus(x, +(el.dataset.min || 25));
@@ -2050,6 +2231,9 @@ document.addEventListener('submit', e => {
     setStudyProgress(p, +f.elements.value.value);
     render();
     toast(p.current >= p.total ? `Hai finito "${p.title}"! 🎉` : 'Progresso aggiornato');
+  } else if (f.id === 'cloud-form') {
+    e.preventDefault();
+    cloudConnect(f.elements.token.value, f.elements.repo.value);
   } else if (f.id === 'sheet-form') {
     e.preventDefault();
     state.settings.myName = f.elements.myName.value.trim();
@@ -2060,7 +2244,10 @@ document.addEventListener('submit', e => {
 });
 
 // Se l'app resta aperta da un giorno all'altro, si aggiorna quando torni sulla finestra.
-window.addEventListener('focus', () => { if (!modal.open) render(); });
+window.addEventListener('focus', () => {
+  if (!modal.open) render();
+  cloudRefresh();
+});
 
 /* ---------- Avvio ---------- */
 
@@ -2075,6 +2262,8 @@ async function boot() {
       console.warn('Server non raggiungibile, uso solo il browser', e);
     }
   }
+  lastSnap = snapshotOf(state);
+  await cloudRefresh({ initial: true });
   applySeed();
   migrate();
   rebalanceAll();

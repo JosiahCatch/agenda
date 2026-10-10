@@ -496,3 +496,9 @@ code { background: #efeae1; padding: 1px 5px; border-radius: 4px; font-size: 13p
 
 .now-preview { margin: 6px 0 0; font-size: 16px; }
 .now-preview span { opacity: .75; font-size: 14px; }
+
+/* ---------- Sincronizzazione ---------- */
+
+.howto { margin: 8px 0 14px; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.howto a { color: var(--accent); font-weight: 600; }
+.settings-form p { margin-top: 0; }
