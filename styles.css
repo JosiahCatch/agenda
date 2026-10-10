@@ -502,3 +502,107 @@ code { background: #efeae1; padding: 1px 5px; border-radius: 4px; font-size: 13p
 .howto { margin: 8px 0 14px; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
 .howto a { color: var(--accent); font-weight: 600; }
 .settings-form p { margin-top: 0; }
+
+/* ---------- Schermi grandi ---------- */
+
+/* Larghezza per pagina: la settimana e il calendario usano tutto lo schermo,
+   le pagine da leggere restano strette perché righe lunghe stancano. */
+main[data-view="settimana"], main[data-view="calendario"] { max-width: 2400px; }
+main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni"] { max-width: 1360px; }
+
+/* Settimana: su schermi stretti una colonna sola, nell'ordine w-1 … w-12 */
+.week-layout { display: flex; flex-direction: column; gap: 22px; }
+.week-main, .week-rail { display: contents; }
+.week-layout .section, .week-layout .banner, .week-layout .plan-banner,
+.week-layout .habits, .week-layout .now-card, .week-layout .week-summary { margin: 0; }
+.w-1 { order: 1; } .w-2 { order: 2; } .w-3 { order: 3; } .w-4 { order: 4; }
+.w-5 { order: 5; } .w-6 { order: 6; } .w-7 { order: 7; } .w-8 { order: 8; }
+.w-9 { order: 9; } .w-10 { order: 10; } .w-11 { order: 11; } .w-12 { order: 12; }
+
+.slot-label { text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 600; }
+
+@media (min-width: 1440px) {
+  /* A sinistra cosa fare, a destra il contesto */
+  .week-layout {
+    display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 24vw, 430px);
+    gap: 32px; align-items: start;
+  }
+  .week-main, .week-rail { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+  .week-rail h2 { font-size: 19px; margin-bottom: 10px; }
+
+  .week-rail .week-summary { flex-wrap: wrap; gap: 10px; }
+  .week-rail .stat { flex: 1; min-width: 0; padding: 10px 14px; }
+  .week-rail .stat.grow { flex-basis: 100%; }
+
+  .week-rail .habits { padding: 12px 16px; }
+  .week-rail .habit { flex-wrap: wrap; row-gap: 6px; padding: 4px 0; }
+  .week-rail .habit-name { width: auto; flex: 1; }
+  .week-rail .habit-streak { order: 2; }
+  .week-rail .chain { order: 3; width: 100%; justify-content: space-between; gap: 0; }
+  .week-rail .chain i { width: 15px; height: 15px; }
+
+  .week-rail .banner, .week-rail .plan-banner { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .week-rail .banner > span { flex: none; }
+
+  .week-rail .event-card { flex-wrap: wrap; padding: 12px 14px; gap: 6px 12px; }
+  .week-rail .ev-body { flex: 1 1 200px; }
+  .week-rail .ev-side { flex-direction: row; flex-wrap: wrap; align-items: center; width: 100%; padding-left: 38px; gap: 10px; }
+  .week-rail .ev-title { white-space: normal; }
+
+  .cal-cell { min-height: 124px; }
+}
+
+@media (min-width: 2200px) {
+  body { font-size: 16px; }
+
+  /* La settimana come un vero calendario: sette colonne affiancate */
+  .board { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .board-day { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; border-top: none; border-left: 1px solid var(--line); min-width: 0; }
+  .board-day:first-child { border-left: none; }
+  .board-date {
+    border-right: none; border-bottom: 1px solid var(--line);
+    flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-height: 58px;
+  }
+  .board-day.is-today .board-date { box-shadow: inset 0 4px 0 var(--accent); }
+  .board-items { justify-content: flex-start; padding: 10px; }
+  .board-items .task { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
+  .board-items .task-main { min-width: 0; align-items: flex-start; }
+  .board-items .task-meta { justify-content: flex-start; }
+  .board-items, .board-items .tasks, .board-items .task, .board-items .task-meta { min-width: 0; }
+  .board-items .task-meta > * { max-width: 100%; }
+  .board-items .chip { max-width: 100%; min-width: 0; }
+  .board-items .task-label { overflow-wrap: anywhere; }
+  .board-items .when { display: none; } /* il momento è già scritto sopra, nel titoletto del blocco */
+  .board-items .task:hover .when, .board-items .task:focus-within .when { display: inline-block; }
+  .event-pill { white-space: normal; }
+
+  .cal-cell { min-height: 150px; }
+}
+
+/* ---------- Telefono ---------- */
+@media (max-width: 800px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  main { min-width: 0; }
+  .nav-list { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .nav { white-space: nowrap; }
+  .sidebar-actions { flex-direction: row; flex-wrap: wrap; }
+  .sidebar-actions > button { flex: 1; }
+  .page-head.row { flex-wrap: wrap; }
+  .page-head h1 { font-size: 32px; }
+  .week-summary { flex-wrap: wrap; flex-direction: row; }
+  .week-summary .stat { flex: 1; }
+  .week-summary .stat.grow { flex-basis: 100%; }
+  .habit { flex-wrap: wrap; row-gap: 6px; }
+  .habit-name { width: auto; flex: 1; }
+  .habit-streak { order: 2; }
+  .chain { order: 3; width: 100%; justify-content: space-between; gap: 0; }
+  .chain i { width: 14px; height: 14px; }
+  .banner { flex-wrap: wrap; }
+  .task-main { min-width: 0; flex-basis: 100%; }
+  .task-meta { justify-content: flex-start; }
+  .chip { max-width: 100%; }
+  .event-card { flex-wrap: wrap; }
+  .ev-side { flex-direction: row; align-items: center; width: 100%; padding-left: 38px; }
+  .ev-title { white-space: normal; }
+  .now-focus h2 { font-size: 22px; }
+}

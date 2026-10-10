@@ -68,6 +68,7 @@ const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const WHEN = { mattina: '☀️ mattina', pomeriggio: '🌤️ pomeriggio', sera: '🌙 sera' };
 const WHEN_HOURS = { mattina: '7–9', pomeriggio: '', sera: '19–20' };
 const WHEN_CYCLE = ['mattina', 'pomeriggio', 'sera'];
+const SLOT_TITLE = { mattina: '☀️ Mattina, 7–9', pomeriggio: '🌤️ Pomeriggio', sera: '🌙 Sera, 19–20' };
 const MONTHS = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'];
 
 /* ---------- Stato e salvataggio ---------- */
@@ -798,6 +799,7 @@ const main = document.getElementById('main');
 
 function render() {
   document.querySelectorAll('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  main.dataset.view = view;
   main.innerHTML = VIEWS[view]();
   renderSyncStatus();
 }
@@ -844,7 +846,7 @@ function viewSettimana() {
       const inSlot = dayTasks.filter(x => taskSlot(x) === slot);
       const sug = anticip[`${d}|${slot}`];
       if (inSlot.length || sug) {
-        tasksHtml += `<li class="slot-label">${WHEN[slot]} <span>${WHEN_HOURS[slot]}</span></li>${inSlot.map(x => taskItem(x)).join('')}`;
+        tasksHtml += `<li class="slot-label">${SLOT_TITLE[slot]}</li>${inSlot.map(x => taskItem(x)).join('')}`;
         if (sug) tasksHtml += taskItem(sug, { suggest: true, onDay: d });
       }
     }
@@ -867,7 +869,30 @@ function viewSettimana() {
       </div>`;
   }
 
-  return `
+  // Due colonne sugli schermi larghi: a sinistra cosa fare (Adesso, arretrati, settimana),
+  // a destra il contesto. Sugli schermi stretti le colonne si sciolgono e vale l'ordine "w-N".
+  const banners = [
+    giovToChoose ? `<div class="banner w-3">🧒 <span><strong>Giovanissimi:</strong> quali incontri guidi tu? La preparazione partirà solo per quelli.</span>
+      <button class="primary" data-action="giov-choose">Scegli i tuoi incontri</button></div>` : '',
+    !serverMode && !cloud.cfg ? `<div class="banner w-4">☁️
+      <span>I dati sono solo in questo browser. Attiva la sincronizzazione per averli uguali su tutti i dispositivi.</span>
+      <button class="primary" data-action="nav" data-view="impostazioni">Attiva</button></div>` : '',
+    !state.settings.sheetUrl && location.protocol !== 'file:' ? `<div class="banner w-5">🎤
+      <span>Collega il foglio delle prediche: le tue prediche e presidenze arriveranno da sole.</span>
+      <button data-action="nav" data-view="impostazioni">Collega il foglio</button></div>` : '',
+    needsPlanning ? `
+      <div class="plan-banner w-7">
+        <div>
+          <strong>🗓️ Pianifica la settimana (5 minuti)</strong>
+          <p>Ogni passo ha già un momento della giornata (☀️ mattina 7–9, 🌙 sera 19–20). Scorri i giorni:
+          se un momento non va bene cliccaci sopra per cambiarlo. Decidere in anticipo <em>quando</em> fare una cosa
+          aumenta molto la probabilità di farla davvero.</p>
+        </div>
+        <button class="primary" data-action="week-planned" data-week="${weekKey}">Fatto, settimana pianificata</button>
+      </div>` : '',
+  ].join('');
+
+  const header = `
     <header class="page-head row">
       <div>
         <p class="eyebrow">Dal ${fmtDM(mon)} al ${fmtDM(sun)}</p>
@@ -878,74 +903,65 @@ function viewSettimana() {
         <button data-action="week-today">Oggi</button>
         <button data-action="week-next" title="Settimana successiva">›</button>
       </div>
-    </header>
+    </header>`;
 
-    ${isCurrent && !nothingAtAll ? nowCard() + habitCard() : ''}
-
-    ${giovToChoose ? `<div class="banner">🧒 <span><strong>Giovanissimi:</strong> quali incontri guidi tu? La preparazione partirà solo per quelli.</span>
-      <button class="primary" data-action="giov-choose">Scegli i tuoi incontri</button></div>` : ''}
-
-    ${!serverMode && !cloud.cfg ? `<div class="banner">☁️
-      <span>I dati sono solo in questo browser. Attiva la sincronizzazione per averli uguali su tutti i dispositivi.</span>
-      <button class="primary" data-action="nav" data-view="impostazioni">Attiva</button></div>` : ''}
-
-    ${!state.settings.sheetUrl && location.protocol !== 'file:' ? `<div class="banner">🎤
-      <span>Collega il foglio delle prediche: le tue prediche e presidenze arriveranno da sole.</span>
-      <button data-action="nav" data-view="impostazioni">Collega il foglio</button></div>` : ''}
-
-    ${nothingAtAll ? emptyCard('Non hai ancora inserito nulla.',
+  if (nothingAtAll) {
+    return `${header}${banners}${emptyCard('Non hai ancora inserito nulla.',
       `<button class="primary" data-action="new-event">+ Nuovo impegno</button>
        <button data-action="quick-add">Inserimento rapido</button>
-       <button data-action="new-study">+ Piano di studio</button>`) : `
-    <section class="week-summary">
-      <div class="stat"><strong>${events.length}</strong><span>${events.length === 1 ? 'impegno' : 'impegni'}</span></div>
-      <div class="stat"><strong>${tasks.length}</strong><span>${tasks.length === 1 ? 'passo' : 'passi'} in programma</span></div>
-      <div class="stat grow">
-        <div class="stat-row"><span>Passi completati</span><strong>${done}/${tasks.length}</strong></div>
-        <div class="bar"><span style="width:${pct}%"></span></div>
+       <button data-action="new-study">+ Piano di studio</button>`)}`;
+  }
+
+  return `${header}
+    <div class="week-layout">
+      <div class="week-main">
+        ${isCurrent ? `<div class="w-1">${nowCard()}</div>` : ''}
+
+        ${late.length ? `
+          <section class="section late-section w-8">
+            <h2>⚠️ Rimasti indietro</h2>
+            <ul class="tasks">${late.map(x => taskItem(x, { showDue: true })).join('')}</ul>
+          </section>` : ''}
+
+        <section class="section w-10">
+          <h2>Giorno per giorno</h2>
+          <div class="board">${board}</div>
+        </section>
       </div>
-    </section>`}
 
-    ${needsPlanning ? `
-      <div class="plan-banner">
-        <div>
-          <strong>🗓️ Pianifica la settimana (5 minuti)</strong>
-          <p>Ogni passo ha già un momento della giornata (☀️ mattina 7–9, 🌙 sera 19–20). Scorri i giorni qui sotto:
-          se un momento non va bene cliccaci sopra per cambiarlo. Decidere in anticipo <em>quando</em> fare una cosa
-          aumenta molto la probabilità di farla davvero.</p>
-        </div>
-        <button class="primary" data-action="week-planned" data-week="${weekKey}">Fatto, settimana pianificata</button>
-      </div>` : ''}
+      <aside class="week-rail">
+        <section class="week-summary w-6">
+          <div class="stat"><strong>${events.length}</strong><span>${events.length === 1 ? 'impegno' : 'impegni'}</span></div>
+          <div class="stat"><strong>${tasks.length}</strong><span>${tasks.length === 1 ? 'passo' : 'passi'} in programma</span></div>
+          <div class="stat grow">
+            <div class="stat-row"><span>Passi completati</span><strong>${done}/${tasks.length}</strong></div>
+            <div class="bar"><span style="width:${pct}%"></span></div>
+          </div>
+        </section>
 
-    ${late.length ? `
-      <section class="section late-section">
-        <h2>⚠️ Rimasti indietro</h2>
-        <ul class="tasks">${late.map(x => taskItem(x, { showDue: true })).join('')}</ul>
-      </section>` : ''}
+        ${isCurrent ? `<div class="w-2">${habitCard()}</div>` : ''}
 
-    ${!nothingAtAll ? `
-      <section class="section">
-        <h2>Impegni</h2>
-        ${events.length ? `<div class="event-list">${events.map(eventCard).join('')}</div>`
-          : '<p class="muted">Nessun impegno in questi 7 giorni.</p>'}
-      </section>
+        ${banners}
 
-      <section class="section">
-        <h2>Giorno per giorno</h2>
-        <div class="board">${board}</div>
-      </section>` : ''}
+        <section class="section w-9">
+          <h2>Impegni</h2>
+          ${events.length ? `<div class="event-list">${events.map(eventCard).join('')}</div>`
+            : '<p class="muted">Nessun impegno in questi 7 giorni.</p>'}
+        </section>
 
-    ${isCurrent && activeStudies.length ? `
-      <section class="section">
-        <h2>Studio personale</h2>
-        <div class="study-list">${activeStudies.map(p => studyCard(p, { compact: true })).join('')}</div>
-      </section>` : ''}
+        ${isCurrent && activeStudies.length ? `
+          <section class="section w-11">
+            <h2>Studio personale</h2>
+            <div class="study-list">${activeStudies.map(p => studyCard(p, { compact: true })).join('')}</div>
+          </section>` : ''}
 
-    ${later.length ? `
-      <section class="section">
-        <h2>Più avanti</h2>
-        <div class="event-list">${later.map(eventCard).join('')}</div>
-      </section>` : ''}
+        ${later.length ? `
+          <section class="section w-12">
+            <h2>Più avanti</h2>
+            <div class="event-list">${later.map(eventCard).join('')}</div>
+          </section>` : ''}
+      </aside>
+    </div>
   `;
 }
 
