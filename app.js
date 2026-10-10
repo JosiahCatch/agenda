@@ -33,14 +33,15 @@ const DEFAULT_TEMPLATES = {
     { label: 'Scegliere i canti (10 minuti)', offset: 3, when: 'sera' },
     { label: 'Rivedere canti e ordine del culto (10 minuti)', offset: 2, when: 'sera' },
   ]},
-  giovanissimi: { label: 'Giovanissimi', icon: '🧒', color: '#c46a1b', steps: [
+  // time = orario abituale: occupa tutta la sera (l'incontro finisce tardi)
+  giovanissimi: { label: 'Giovanissimi', icon: '🧒', color: '#c46a1b', time: '19:30', steps: [
     { label: 'Leggere il brano e le domande', offset: 5, when: 'sera' },
     { label: 'Studio del brano — giorno 1 di 2', offset: 4, when: 'mattina', heavy: true },
     { label: 'Studio del brano — giorno 2 di 2', offset: 3, when: 'mattina', heavy: true },
     { label: 'Preparare lo studio: schema e punti principali', offset: 2, when: 'mattina', heavy: true },
     { label: 'Ripasso dello studio (e rompighiaccio, se serve)', offset: 1, when: 'sera' },
   ]},
-  chiesa: { label: 'Chiesa in casa', icon: '🏠', color: '#3d7a3a', steps: [
+  chiesa: { label: 'Chiesa in casa', icon: '🏠', color: '#3d7a3a', time: '19:30', steps: [
     { label: 'Scegliere brano o tema', offset: 5, when: 'sera', ifMissing: true },
     { label: 'Studio del brano — giorno 1 di 2', offset: 4, when: 'mattina', heavy: true },
     { label: 'Studio del brano — giorno 2 di 2', offset: 3, when: 'mattina', heavy: true },
@@ -98,7 +99,7 @@ function normalize(s) {
 }
 
 // Aggiornamenti dei dati tra una versione e l'altra (girano anche sul sito, dove seed.js non c'è).
-const SCHEMA = 3;
+const SCHEMA = 4;
 function migrate() {
   const t = today();
   if (state.schema < 3) {
@@ -108,6 +109,10 @@ function migrate() {
       if (ev.date >= t && !ev.notMine && !ev.steps.some(st => st.done)) ev.steps = planSteps(ev.type, ev.date, ev.passage).map(stepFrom);
     }
     state.habitStart = state.habitStart || addDays(t, 1);
+  }
+  if (state.schema < 4) {
+    // v4: chiesa in casa e giovanissimi hanno un orario abituale, che occupa la sera
+    for (const ev of state.events) if (!ev.time && ev.date >= t && tpl(ev.type).time) ev.time = tpl(ev.type).time;
   }
   state.schema = SCHEMA;
 }
@@ -361,7 +366,7 @@ function setDone(item, done) {
 function createEvent({ type, date, title, notes, time, passage }) {
   const ev = {
     id: uid(), type, date,
-    time: time || '',
+    time: time || tpl(type).time || '',
     title: title || tpl(type).label,
     passage: passage || '',
     notes: notes || '',
@@ -1711,6 +1716,12 @@ function openEventForm(ev, presetDate) {
         ${squeezed ? `<p class="hint warn">⚠️ Hai meno tempo del solito: ${squeezed} ${squeezed === 1 ? 'passo è stato spostato' : 'passi sono stati spostati'} a oggi.</p>` : ''}`
         : '<p class="muted">Nessun passo di preparazione per questo tipo.</p>';
     };
+    // Orario abituale del tipo scelto, finché non lo cambi a mano
+    const timeInput = form.elements.time;
+    timeInput.addEventListener('input', () => { timeInput.dataset.touched = '1'; });
+    form.addEventListener('change', e => {
+      if (e.target.name === 'type' && !timeInput.dataset.touched) timeInput.value = tpl(e.target.value).time || '';
+    });
     form.addEventListener('input', update);
     update();
     form.addEventListener('submit', e => {
