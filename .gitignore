@@ -1,0 +1,7 @@
+# Dati personali: restano solo su questo computer
+dati.json
+dati.json.tmp
+backup/
+
+# Dati iniziali privati (calendario giovanissimi, piano di studio)
+seed.js

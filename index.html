@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agenda del servizio</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">Agenda<span>del servizio</span></div>
+      <div class="nav-list">
+        <button class="nav" data-action="nav" data-view="settimana">🗓️ Settimana</button>
+        <button class="nav" data-action="nav" data-view="metodo">🧭 Il metodo</button>
+        <button class="nav" data-action="nav" data-view="agenda">🗒️ Agenda</button>
+        <button class="nav" data-action="nav" data-view="calendario">📅 Calendario</button>
+        <button class="nav" data-action="nav" data-view="studio">📖 Studio personale</button>
+        <button class="nav" data-action="nav" data-view="impostazioni">⚙️ Impostazioni</button>
+      </div>
+      <div class="sidebar-actions">
+        <button class="primary" data-action="new-event">+ Nuovo impegno</button>
+        <button data-action="quick-add">Inserimento rapido</button>
+        <div id="sync-status" class="sync"></div>
+      </div>
+    </nav>
+    <main id="main"></main>
+  </div>
+
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+  <div id="toast" class="toast"></div>
+
+  <script src="seed.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
