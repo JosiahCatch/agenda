@@ -407,9 +407,20 @@ const sectionPages = s => s.from ? (s.to > s.from ? `pp. ${s.from}–${s.to}` : 
 const RESPONSIBILITY = ['predica', 'giovanissimi', 'chiesa'];
 const isHeavyDay = d => state.events.some(ev => !ev.notMine && (
   (ev.date === d && RESPONSIBILITY.includes(ev.type)) || ev.steps.some(s => s.heavy && s.due === d)));
-const dayWeight = d => (parse(d).getDay() === 0 ? 2 : 1) * (isHeavyDay(d) ? 0.5 : 1);
+const dayWeight = d => {
+  // Mattina presa da una preparazione (o da un impegno) e sera presa da un incontro: niente Wright.
+  if ((busyMorning(d) || eventInBlock(d, 'mattina')) && eventInBlock(d, 'sera')) return 0;
+  return (parse(d).getDay() === 0 ? 2 : 1) * (isHeavyDay(d) ? 0.5 : 1);
+};
 const busyMorning = d => state.events.some(ev => !ev.notMine && ev.steps.some(st => st.heavy && st.when === 'mattina' && st.due === d));
-const studyWhen = d => parse(d).getDay() === 0 ? 'pomeriggio' : busyMorning(d) ? 'sera' : 'mattina';
+
+// Un impegno con orario occupa il blocco in cui cade: dalle 17 la sera (es. giovanissimi 19:30–22),
+// prima delle 12 la mattina. Vale anche per gli incontri guidati da altri: ci sei comunque.
+const eventInBlock = (d, slot) => state.events.find(ev => ev.date === d && ev.time
+  && (slot === 'sera' ? ev.time >= '17:00' : slot === 'mattina' ? ev.time < '12:00' : false));
+
+const studyWhen = d => parse(d).getDay() === 0 ? 'pomeriggio'
+  : busyMorning(d) || eventInBlock(d, 'mattina') ? 'sera' : 'mattina';
 
 function studyDaysIn(plan, start, span, notBefore) {
   const out = [];
@@ -420,7 +431,9 @@ function studyDaysIn(plan, start, span, notBefore) {
   return out;
 }
 
-function distribute(ch, days) {
+function distribute(ch, allDays) {
+  const usable = allDays.filter(d => dayWeight(d) > 0);
+  const days = usable.length ? usable : allDays;
   const todo = ch.sections.filter(s => !s.done && !s.exam);
   const exam = ch.sections.find(s => s.exam && !s.done);
   const assign = (s, d) => { s.due = d; if (!s.whenSet) s.when = studyWhen(d); };
@@ -460,8 +473,22 @@ function schedulePlan(plan, fromDate) {
 }
 
 // Quando cambiano gli impegni, riequilibra le letture dei capitoli futuri senza spostarli di settimana.
+function moveOutOfBusyEvenings() {
+  const t = today();
+  for (const ev of state.events) {
+    for (const st of ev.steps) {
+      if (st.done || st.whenSet || st.when !== 'sera' || st.due < t || !eventInBlock(st.due, 'sera')) continue;
+      const prev = addDays(st.due, -1);
+      if (parse(st.due).getDay() === 6) st.when = 'pomeriggio';
+      else if (prev >= t && parse(prev).getDay() !== 0 && !eventInBlock(prev, 'sera')) st.due = prev;
+      else st.when = 'mattina';
+    }
+  }
+}
+
 function rebalanceAll() {
   const t = today();
+  moveOutOfBusyEvenings();
   for (const plan of state.studies) {
     if (plan.kind !== 'chapters') continue;
     for (const ch of plan.chapters) {
@@ -1002,7 +1029,7 @@ function anticipations(from, to) {
   for (let d = from < t ? t : from; d <= to; d = addDays(d, 1)) {
     if (parse(d).getDay() === 0 || isHeavyDay(d)) continue;
     for (const slot of ['mattina', 'sera']) {
-      if (!blockIsLight(tasks, d, slot) || (d === t && (used.has(`${d}|${slot}`) || (slot === 'mattina' && new Date().getHours() >= 12)))) continue;
+      if (!blockIsLight(tasks, d, slot) || eventInBlock(d, slot) || (d === t && (used.has(`${d}|${slot}`) || (slot === 'mattina' && new Date().getHours() >= 12)))) continue;
       const x = pool.find(c => c.item.due > d && !taken.has(c.item.id));
       if (x) { taken.add(x.item.id); out[`${d}|${slot}`] = x; }
     }
@@ -1020,7 +1047,7 @@ function habitCard() {
   const expected = d => d >= start && parse(d).getDay() !== 0;
   const status = (d, block) => {
     if (used.has(`${d}|${block}`)) return 'on';
-    if (!expected(d)) return 'rest';
+    if (!expected(d) || eventInBlock(d, block)) return 'rest';
     if (d === t) return block === 'mattina' && hour >= 12 ? 'off' : 'today';
     return 'off';
   };
@@ -1071,6 +1098,18 @@ function nowCard() {
     focus = pick(slot('mattina')[0], late[0], sug[`${t}|mattina`], todays[0]);
     head = h < 7 ? '🌅 Alle 7 inizia il blocco del mattino. Si comincia da:' : '☀️ Blocco del mattino (7–9). Adesso tocca a:';
     if (h < 7) note = 'Apri l\'agenda prima del telefono: il primo quarto d\'ora decide la giornata.';
+  } else if (h < 22 && eventInBlock(t, 'sera')) {
+    // Stasera c'è un incontro: niente blocco serale
+    const ev = eventInBlock(t, 'sera');
+    const what = `${tpl(ev.type).icon} ${esc(ev.title)} alle ${ev.time}`;
+    focus = h < 19 ? pick(slot('mattina')[0], slot('pomeriggio')[0], late[0]) : null;
+    if (focus) {
+      head = `Stasera c'è ${what}. Se ti è rimasto qualcosa, fallo prima:`;
+    } else {
+      head = `Stasera c'è ${what}: niente blocco serale.`;
+      preview = pick(tasksBetween(tomorrow, tomorrow).find(x => !x.item.done && taskSlot(x) === 'mattina'), sug[`${tomorrow}|mattina`]);
+      note = preview ? "Goditi l'incontro: domattina si riparte da qui." : "Goditi l'incontro. Domattina non hai niente in programma.";
+    }
   } else if (h < 19) {
     if (h >= 14 && slot('pomeriggio').length) {
       head = '🌤️ Pomeriggio. Adesso tocca a:';
@@ -1089,7 +1128,7 @@ function nowCard() {
     preview = pick(tasksBetween(tomorrow, tomorrow).find(x => !x.item.done && taskSlot(x) === 'mattina'), sug[`${tomorrow}|mattina`]);
     if (!preview) note = 'Domattina non hai niente in programma.';
   }
-  if (!focus && !preview && h < 22) {
+  if (!focus && !preview && h < 22 && !eventInBlock(t, 'sera')) {
     head = doneToday ? '✅ Per oggi hai fatto tutto' : '🌿 Oggi non hai niente in programma';
     note = 'Il resto del tempo è tuo: goditelo senza sensi di colpa. Te lo sei guadagnato.';
   }
