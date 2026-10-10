@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agenda del servizio</title>
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Tema prima di disegnare la pagina (niente lampo bianco): scelta salvata, altrimenti quello del sistema
+    (function () {
+      var t = localStorage.getItem('agenda-theme');
+      if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
 </head>
 <body>
   <div class="app">
@@ -22,6 +30,7 @@
       <div class="sidebar-actions">
         <button class="primary" data-action="new-event">+ Nuovo impegno</button>
         <button data-action="quick-add">Inserimento rapido</button>
+        <button class="theme-toggle" id="theme-toggle" data-action="toggle-theme"></button>
         <div id="sync-status" class="sync"></div>
       </div>
     </nav>

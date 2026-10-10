@@ -848,8 +848,29 @@ function renderLegend() {
   el.innerHTML = items.map(([c, l]) => `<li style="--c:${c}">${esc(l)}</li>`).join('');
 }
 
+/* ---------- Tema chiaro / scuro (scelta di questo dispositivo, non sincronizzata) ---------- */
+
+const THEME_KEY = 'agenda-theme';
+const currentTheme = () => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+
+function renderThemeButton() {
+  const b = document.getElementById('theme-toggle');
+  if (b) b.textContent = currentTheme() === 'dark' ? '☀️ Tema chiaro' : '🌙 Tema scuro';
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  renderThemeButton();
+}
+
+// Senza una scelta esplicita, segue il sistema anche quando cambia (es. modalità notte automatica)
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+  if (!localStorage.getItem(THEME_KEY)) setTheme(e.matches ? 'dark' : 'light');
+});
+
 function render() {
   renderLegend();
+  renderThemeButton();
   document.querySelectorAll('.nav').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   main.dataset.view = view;
   main.innerHTML = VIEWS[view]();
@@ -2220,6 +2241,12 @@ document.addEventListener('click', e => {
       break;
     case 'giov-choose': openGiovChooser(); break;
     case 'cloud-disconnect': cloudDisconnect(); break;
+    case 'toggle-theme': {
+      const theme = currentTheme() === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, theme);
+      setTheme(theme);
+      break;
+    }
     case 'focus-start': {
       const x = taskFromRef(el);
       if (x) openFocus(x, +(el.dataset.min || 25));
