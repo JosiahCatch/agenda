@@ -15,6 +15,7 @@ const STORAGE_KEY = 'agenda-servizio-v1';
 // I passi che cadrebbero di domenica vengono anticipati al sabato (la domenica resta libera da responsabilità).
 const DEFAULT_TEMPLATES = {
   predica: { label: 'Predica', icon: '🎤', color: '#5b4bb7', steps: [
+    { label: 'Il brano non è ancora nel foglio: chiedilo ai responsabili', offset: 9, when: 'sera', ifMissing: true },
     { label: 'Scegliere il brano (la predica è a tema libero)', offset: 9, when: 'mattina', ifFree: true },
     { label: 'Lettura del brano e prime osservazioni', offset: 8, when: 'mattina' },
     { label: 'Esegesi e commentari — giorno 1 di 4', offset: 8, when: 'sera', heavy: true },
@@ -40,7 +41,7 @@ const DEFAULT_TEMPLATES = {
     { label: 'Ripasso dello studio (e rompighiaccio, se serve)', offset: 1, when: 'sera' },
   ]},
   chiesa: { label: 'Chiesa in casa', icon: '🏠', color: '#3d7a3a', steps: [
-    { label: 'Scegliere brano o tema', offset: 5, when: 'sera' },
+    { label: 'Scegliere brano o tema', offset: 5, when: 'sera', ifMissing: true },
     { label: 'Studio del brano — giorno 1 di 2', offset: 4, when: 'mattina', heavy: true },
     { label: 'Studio del brano — giorno 2 di 2', offset: 3, when: 'mattina', heavy: true },
     { label: 'Preparare lo studio: schema e domande', offset: 2, when: 'mattina', heavy: true },
@@ -87,8 +88,26 @@ function normalize(s) {
     settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
     plannedWeeks: s.plannedWeeks || {},
     seedVersion: s.seedVersion || 0,
+    schema: s.schema || 0,
+    habitStart: s.habitStart || null,
+    sessions: s.sessions || [],
     lastBackup: s.lastBackup || null,
   };
+}
+
+// Aggiornamenti dei dati tra una versione e l'altra (girano anche sul sito, dove seed.js non c'è).
+const SCHEMA = 3;
+function migrate() {
+  const t = today();
+  if (state.schema < 3) {
+    // v3: Wright al mattino, promemoria per il brano non assegnato, abitudini
+    state.templates = structuredClone(DEFAULT_TEMPLATES);
+    for (const ev of state.events) {
+      if (ev.date >= t && !ev.notMine && !ev.steps.some(st => st.done)) ev.steps = planSteps(ev.type, ev.date, ev.passage).map(stepFrom);
+    }
+    state.habitStart = state.habitStart || addDays(t, 1);
+  }
+  state.schema = SCHEMA;
 }
 
 function loadLocal() {
@@ -169,19 +188,28 @@ const tpl = type => state.templates[type] || state.templates.altro;
 const findEvent = id => state.events.find(e => e.id === id);
 const byDate = (a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || '');
 
+// Brano vuoto = non ancora assegnato (promemoria per chiederlo); "libero" = da scegliere io (un giorno in più).
+const isFreePassage = p => /^\s*(tema\s+)?libero/i.test(p || '');
+
 function planSteps(type, date, passage = '') {
   const t = today();
-  const free = type === 'predica' && !meaningfulPassage(passage);
-  return tpl(type).steps.filter(st => !st.ifFree || free).map(st => {
+  const missing = ['predica', 'chiesa'].includes(type) && !(passage || '').trim();
+  const free = type === 'predica' && isFreePassage(passage);
+  return tpl(type).steps.filter(st => (!st.ifFree || free) && (!st.ifMissing || missing)).map(st => {
     let due = addDays(date, -st.offset);
     if (st.offset > 0 && parse(due).getDay() === 0) due = addDays(due, -1);
     const squeezed = date >= t && due < t;
     if (squeezed) due = t;
-    return { label: st.label, due, squeezed, when: st.when || 'mattina', heavy: !!st.heavy };
+    return { label: st.label, due, squeezed, when: st.when || 'mattina', heavy: !!st.heavy, auto: st.ifMissing ? 'missing' : undefined };
   });
 }
 
-const stepFrom = s => ({ id: uid(), label: s.label, due: s.due, done: false, when: s.when, heavy: s.heavy });
+const stepFrom = s => ({ id: uid(), label: s.label, due: s.due, done: false, when: s.when, heavy: s.heavy, ...(s.auto ? { auto: s.auto } : {}) });
+
+function setDone(item, done) {
+  item.done = done;
+  item.doneAt = done ? new Date().toISOString() : null;
+}
 
 function createEvent({ type, date, title, notes, time, passage }) {
   const ev = {
@@ -233,7 +261,8 @@ const RESPONSIBILITY = ['predica', 'giovanissimi', 'chiesa'];
 const isHeavyDay = d => state.events.some(ev => !ev.notMine && (
   (ev.date === d && RESPONSIBILITY.includes(ev.type)) || ev.steps.some(s => s.heavy && s.due === d)));
 const dayWeight = d => (parse(d).getDay() === 0 ? 2 : 1) * (isHeavyDay(d) ? 0.5 : 1);
-const studyWhen = d => parse(d).getDay() === 0 ? 'pomeriggio' : 'sera';
+const busyMorning = d => state.events.some(ev => !ev.notMine && ev.steps.some(st => st.heavy && st.when === 'mattina' && st.due === d));
+const studyWhen = d => parse(d).getDay() === 0 ? 'pomeriggio' : busyMorning(d) ? 'sera' : 'mattina';
 
 function studyDaysIn(plan, start, span, notBefore) {
   const out = [];
@@ -288,6 +317,9 @@ function rebalanceAll() {
   const t = today();
   for (const plan of state.studies) {
     if (plan.kind !== 'chapters') continue;
+    for (const ch of plan.chapters) {
+      for (const sec of ch.sections) if (!sec.done && !sec.whenSet && sec.due > t) sec.when = studyWhen(sec.due);
+    }
     for (const ch of plan.chapters) {
       const open = ch.sections.filter(s => !s.done);
       if (!open.length || open.some(s => !s.due || s.due <= t)) continue;
@@ -444,7 +476,7 @@ function whenChip(x) {
   return `<button class="when ${w ? 'set' : ''}" data-action="cycle-when" ${taskRef(x)} title="Quando lo fai? Clicca per cambiare">${w ? WHEN[w] : 'quando?'}</button>`;
 }
 
-function taskItem(x, { showDue = false } = {}) {
+function taskItem(x, { showDue = false, suggest = false, onDay = null } = {}) {
   const it = x.item;
   const late = !it.done && it.due < today();
   let label, chip;
@@ -457,16 +489,16 @@ function taskItem(x, { showDue = false } = {}) {
     chip = `<button class="chip" style="--c:${STUDY_COLOR}" data-action="nav" data-view="studio">📖 Cap. ${x.ch.n} · ${esc(x.ch.title)}</button>`;
   }
   return `
-    <li class="task ${it.done ? 'is-done' : ''} ${late ? 'is-late' : ''}">
+    <li class="task ${it.done ? 'is-done' : ''} ${late ? 'is-late' : ''} ${suggest ? 'suggest' : ''}">
       <label class="task-main">
         <input type="checkbox" data-action="toggle-task" ${taskRef(x)} ${it.done ? 'checked' : ''}>
-        <span class="task-label">${label}</span>
+        <span class="task-label">${suggest ? '<span class="suggest-tag">↪ Portati avanti:</span> ' : ''}${label}</span>
       </label>
       <span class="task-meta">
         ${showDue ? `<span class="due ${late ? 'late' : ''}">${late ? 'era per ' : ''}${rel(it.due)}</span>` : ''}
-        ${whenChip(x)}
+        ${suggest ? `<span class="due">previsto ${fmtShort(it.due)}</span>` : whenChip(x)}
         ${chip}
-        ${!it.done && it.due <= today() ? `<button class="play" data-action="focus-start" ${taskRef(x)} title="Inizia ora: 25 minuti di concentrazione">▶</button>` : ''}
+        ${!it.done && (it.due <= today() || (suggest && onDay === today())) ? `<button class="play" data-action="focus-start" ${taskRef(x)} title="Inizia ora: 25 minuti di concentrazione">▶</button>` : ''}
       </span>
     </li>`;
 }
@@ -646,6 +678,7 @@ function viewSettimana() {
   const title = { 0: 'I prossimi 7 giorni', 1: 'La settimana dopo', [-1]: 'I 7 giorni prima' }[weekOffset] || 'Settimana';
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
 
+  const anticip = anticipations(t, sun);
   let board = '';
   for (let i = 0; i < 7; i++) {
     const d = addDays(mon, i);
@@ -659,11 +692,15 @@ function viewSettimana() {
         <label class="task-main"><input type="checkbox" data-action="toggle-pageplan" data-id="${p.id}" ${s.doneToday ? 'checked' : ''}>
         <span class="task-label">📖 ${esc(p.title)}: arriva a <strong>${pos(p, s.target)}</strong></span></label></li>`;
     }).join('');
-    const empty = !dayEvents.length && !dayTasks.length && !sessionHtml;
+    const empty = !dayEvents.length && !dayTasks.length && !sessionHtml && !anticip[`${d}|mattina`] && !anticip[`${d}|sera`];
     let tasksHtml = '';
     for (const slot of SLOT_ORDER) {
       const inSlot = dayTasks.filter(x => taskSlot(x) === slot);
-      if (inSlot.length) tasksHtml += `<li class="slot-label">${WHEN[slot]} <span>${WHEN_HOURS[slot]}</span></li>${inSlot.map(x => taskItem(x)).join('')}`;
+      const sug = anticip[`${d}|${slot}`];
+      if (inSlot.length || sug) {
+        tasksHtml += `<li class="slot-label">${WHEN[slot]} <span>${WHEN_HOURS[slot]}</span></li>${inSlot.map(x => taskItem(x)).join('')}`;
+        if (sug) tasksHtml += taskItem(sug, { suggest: true, onDay: d });
+      }
     }
     board += `
       <div class="board-day ${d === t ? 'is-today' : ''} ${d < t ? 'is-past' : ''}">
@@ -697,7 +734,7 @@ function viewSettimana() {
       </div>
     </header>
 
-    ${isCurrent && !nothingAtAll ? nowCard() : ''}
+    ${isCurrent && !nothingAtAll ? nowCard() + habitCard() : ''}
 
     ${giovToChoose ? `<div class="banner">🧒 <span><strong>Giovanissimi:</strong> quali incontri guidi tu? La preparazione partirà solo per quelli.</span>
       <button class="primary" data-action="giov-choose">Scegli i tuoi incontri</button></div>` : ''}
@@ -768,9 +805,94 @@ function viewSettimana() {
 
 const SLOT_ORDER = ['mattina', 'pomeriggio', 'sera'];
 
+// Blocchi "veri": un passo impegnativo o una lettura. Un blocco con solo cose leggere (o niente) è libero.
+const blockIsLight = (tasks, d, slot) =>
+  !tasks.some(x => x.item.due === d && taskSlot(x) === slot && (x.kind === 'section' || x.item.heavy));
+
+// Blocchi usati: qualcosa completato in quella fascia oraria, o un timer portato a termine.
+function usedBlocks() {
+  const set = new Set();
+  const stamps = [
+    ...allTasks().filter(x => x.item.done && x.item.doneAt).map(x => x.item.doneAt),
+    ...state.sessions.map(se => se.at),
+  ];
+  for (const st of stamps) {
+    const dt = new Date(st);
+    if (dt.getHours() < 12) set.add(`${iso(dt)}|mattina`);
+    else if (dt.getHours() >= 17) set.add(`${iso(dt)}|sera`);
+  }
+  return set;
+}
+
+// Per ogni mattina e sera libera (lun–sab) propone il prossimo passo da anticipare: prima gli impegni
+// delle prossime 3 settimane (hanno una scadenza), poi le letture. Mai nei giorni già impegnativi.
+function anticipations(from, to) {
+  const t = today();
+  const tasks = allTasks();
+  const used = usedBlocks();
+  const horizon = addDays(t, 21);
+  const pool = tasks.filter(x => !x.item.done && !x.item.exam && x.item.due > t
+    && !(x.kind === 'step' && (x.ev.notMine || x.ev.date > horizon || x.item.due >= x.ev.steps.reduce((m, st) => (st.due > m ? st.due : m), '')
+      || (x.ev.type === 'predica' && !x.ev.passage))))
+    .sort((a, b) => (a.kind === 'section') - (b.kind === 'section') || byTask(a, b));
+  const taken = new Set();
+  const out = {};
+  for (let d = from < t ? t : from; d <= to; d = addDays(d, 1)) {
+    if (parse(d).getDay() === 0 || isHeavyDay(d)) continue;
+    for (const slot of ['mattina', 'sera']) {
+      if (!blockIsLight(tasks, d, slot) || (d === t && (used.has(`${d}|${slot}`) || (slot === 'mattina' && new Date().getHours() >= 12)))) continue;
+      const x = pool.find(c => c.item.due > d && !taken.has(c.item.id));
+      if (x) { taken.add(x.item.id); out[`${d}|${slot}`] = x; }
+    }
+  }
+  return out;
+}
+
+function habitCard() {
+  const t = today();
+  const used = usedBlocks();
+  const start = state.habitStart || t;
+  const hour = new Date().getHours();
+  const days = [];
+  for (let i = 13; i >= 0; i--) days.push(addDays(t, -i));
+  const expected = d => d >= start && parse(d).getDay() !== 0;
+  const status = (d, block) => {
+    if (used.has(`${d}|${block}`)) return 'on';
+    if (!expected(d)) return 'rest';
+    if (d === t) return block === 'mattina' && hour >= 12 ? 'off' : 'today';
+    return 'off';
+  };
+  const row = (block, name) => {
+    let streak = 0;
+    for (let i = days.length - 1; i >= 0; i--) {
+      const st = status(days[i], block);
+      if (st === 'on') streak++;
+      else if (st === 'off') break;
+    }
+    const y1 = status(addDays(t, -1), block), y2 = status(addDays(t, -2), block);
+    return {
+      html: `<div class="habit">
+        <span class="habit-name">${name}</span>
+        <span class="chain">${days.map(d => `<i class="${status(d, block)}" title="${fmtShort(d)}"></i>`).join('')}</span>
+        <span class="habit-streak">${streak ? `${streak} di fila` : ''}</span>
+      </div>`,
+      missedTwice: y1 === 'off' && y2 === 'off',
+      missedOnce: y1 === 'off',
+    };
+  };
+  const m = row('mattina', '☀️ Mattine'), e = row('sera', '🌙 Sere');
+  const msg = m.missedTwice || e.missedTwice
+    ? '⚠️ Due blocchi saltati di fila: oggi ricomincia, anche solo 25 minuti. Conta ripartire, non recuperare.'
+    : m.missedOnce || e.missedOnce
+      ? 'Ieri un blocco è saltato: succede. La regola è non saltarlo due volte di fila, quindi oggi non saltarlo.'
+      : 'Un pallino pieno per ogni blocco usato. Regola: mai saltare due volte di fila.';
+  return `<section class="habits">${m.html}${e.html}<p class="hint">${msg}</p></section>`;
+}
+
 // Il riquadro "Adesso": in base all'ora dice una sola cosa da fare, adesso.
 function nowCard() {
   const t = today();
+  const tomorrow = addDays(t, 1);
   const now = new Date();
   const h = now.getHours() + now.getMinutes() / 60;
   const open = allTasks().filter(x => !x.item.done && x.item.due <= t && (x.kind === 'section' || x.ev.date >= t));
@@ -778,36 +900,42 @@ function nowCard() {
   const late = open.filter(x => x.item.due < t).sort(byTask);
   const doneToday = allTasks().filter(x => x.item.done && x.item.due === t).length;
   const slot = name => todays.filter(x => taskSlot(x) === name);
+  const sug = anticipations(t, tomorrow);
+  const used = usedBlocks();
+  const pick = (...c) => c.find(Boolean) || null;
 
-  let head, focus = null, note = '';
-  if (!todays.length && !late.length) {
-    head = doneToday ? '✅ Per oggi hai fatto tutto' : '🌿 Oggi non hai niente in programma';
-    note = 'Il resto del tempo è tuo: goditelo senza sensi di colpa. Te lo sei guadagnato.';
-  } else if (h < 7) {
-    head = '🌅 Alle 7 inizia il blocco del mattino. Si comincia da:';
-    focus = slot('mattina')[0] || todays[0] || late[0];
-    note = 'Apri l\'agenda prima del telefono: il primo quarto d\'ora decide la giornata.';
-  } else if (h < 9) {
-    head = '☀️ Blocco del mattino (7–9). Adesso tocca a:';
-    focus = slot('mattina')[0] || todays[0] || late[0];
+  let head = '', focus = null, preview = null, note = '';
+  if (h < 9) {
+    focus = pick(slot('mattina')[0], late[0], sug[`${t}|mattina`], todays[0]);
+    head = h < 7 ? '🌅 Alle 7 inizia il blocco del mattino. Si comincia da:' : '☀️ Blocco del mattino (7–9). Adesso tocca a:';
+    if (h < 7) note = 'Apri l\'agenda prima del telefono: il primo quarto d\'ora decide la giornata.';
   } else if (h < 19) {
-    const aft = slot('pomeriggio');
-    if (aft.length && h >= 14) {
+    if (h >= 14 && slot('pomeriggio').length) {
       head = '🌤️ Pomeriggio. Adesso tocca a:';
-      focus = aft[0];
+      focus = slot('pomeriggio')[0];
     } else {
       head = '⏳ Il prossimo blocco è stasera alle 19:';
-      focus = slot('sera')[0] || todays[0] || late[0];
-      if (slot('mattina').length) note = `Stamattina è rimasto qualcosa (${plural(slot('mattina').length, 'passo', 'passi')}): stasera inizia da lì.`;
+      focus = pick(slot('mattina')[0], slot('pomeriggio')[0], slot('sera')[0], late[0], sug[`${t}|sera`]);
+      if (slot('mattina').length) note = 'Stamattina è rimasto qualcosa: stasera inizia da lì.';
     }
-  } else if (h < 22) {
+  } else if (h < 22 && !used.has(`${t}|sera`)) {
+    focus = pick(slot('mattina')[0], slot('pomeriggio')[0], slot('sera')[0], late[0], sug[`${t}|sera`]);
     head = '🌙 Blocco serale. Adesso tocca a:';
-    focus = slot('mattina')[0] || slot('pomeriggio')[0] || slot('sera')[0] || late[0];
     note = 'Prima il blocco, poi la TV. Non serve finire tutto: inizia con 25 minuti, il resto viene da sé.';
   } else {
-    head = '🌛 È tardi: non recuperare stanotte. Domattina alle 7 riparti da:';
-    focus = slot('mattina')[0] || todays[0] || late[0];
-    note = 'Dormire bene fa parte del metodo.';
+    head = used.has(`${t}|sera`) ? '✅ Blocco serale fatto: il resto della serata è tuo.' : '🌛 È tardi: niente recuperi stanotte.';
+    preview = pick(tasksBetween(tomorrow, tomorrow).find(x => !x.item.done && taskSlot(x) === 'mattina'), sug[`${tomorrow}|mattina`]);
+    if (!preview) note = 'Domattina non hai niente in programma.';
+  }
+  if (!focus && !preview && h < 22) {
+    head = doneToday ? '✅ Per oggi hai fatto tutto' : '🌿 Oggi non hai niente in programma';
+    note = 'Il resto del tempo è tuo: goditelo senza sensi di colpa. Te lo sei guadagnato.';
+  }
+  const ahead = focus && focus.item.due > t;
+  if (ahead) {
+    head = h < 9 ? '☀️ Mattina libera: portati avanti con'
+      : h < 19 ? '⏳ Stasera alle 19 il blocco è libero: portati avanti con'
+      : '🌙 Sera libera: portati avanti con';
   }
 
   const label = x => x.kind === 'step' ? esc(x.item.label) : esc(x.item.title);
@@ -827,7 +955,7 @@ function nowCard() {
         <div class="now-focus">
           <div>
             <h2>${label(focus)}</h2>
-            <p class="muted">${context(focus)}${focus.item.due < t ? ` · <span class="late-text">era per ${rel(focus.item.due)}</span>` : ''}</p>
+            <p class="muted">${context(focus)}${focus.item.due < t ? ` · <span class="late-text">era per ${rel(focus.item.due)}</span>` : ''}${ahead ? ` · previsto ${fmtShort(focus.item.due)}` : ''}</p>
           </div>
           <div class="now-actions">
             <button class="primary big" data-action="focus-start" data-min="25" ${taskRef(focus)}>▶ Inizia · 25 min</button>
@@ -835,6 +963,7 @@ function nowCard() {
             <button data-action="quick-done" ${taskRef(focus)}>✓ Già fatto</button>
           </div>
         </div>` : ''}
+      ${preview ? `<p class="now-preview">Domattina alle 7: <strong>${label(preview)}</strong> <span>· ${context(preview)}</span></p>` : ''}
       ${note ? `<p class="now-note">${note}</p>` : ''}
       ${counts ? `<p class="now-counts">${counts}</p>` : ''}
     </section>`;
@@ -1015,7 +1144,7 @@ function viewImpostazioni() {
 
 function tplRow(st = { label: '', offset: 1, when: 'mattina' }) {
   return `
-    <div class="tpl-row" data-iffree="${st.ifFree ? 1 : ''}">
+    <div class="tpl-row" data-iffree="${st.ifFree ? 1 : ''}" data-ifmissing="${st.ifMissing ? 1 : ''}">
       <input class="tpl-label" value="${esc(st.label)}" placeholder="Descrizione del passo">
       <input class="tpl-offset" type="number" min="0" max="60" value="${st.offset}">
       <span class="muted">gg prima</span>
@@ -1037,11 +1166,11 @@ function viewMetodo() {
       <h2>La tua giornata tipo</h2>
       <div class="method-grid">
         <div class="method-col"><h3>Lunedì – Venerdì</h3>
-          <p><strong>☀️ 7–9</strong> Lavoro impegnativo: esegesi, studio, stesura</p>
-          <p><strong>🌙 19–20</strong> Wright (o ciò che è rimasto dal mattino)</p>
-          <p><strong>Dopo le 20</strong> Libero. Davvero.</p></div>
+          <p><strong>☀️ 7–9</strong> Wright, a mente fresca. Se c'è esegesi, studio o stesura, prima quella (e Wright passa alla sera)</p>
+          <p><strong>🌙 19–20</strong> La preparazione degli impegni. Sera libera? Ti porti avanti col prossimo passo</p>
+          <p><strong>Dopo le 20</strong> Libero, davvero.</p></div>
         <div class="method-col"><h3>Sabato</h3>
-          <p><strong>☀️ 7–9</strong> Il passo del giorno</p>
+          <p><strong>☀️ 7–9</strong> Il passo del giorno, o ti porti avanti</p>
           <p><strong>Prima di una predica</strong> PowerPoint e ripetizione ad alta voce</p></div>
         <div class="method-col"><h3>Domenica</h3>
           <p>Nessuna responsabilità da preparare</p>
@@ -1055,6 +1184,8 @@ function viewMetodo() {
         di lavoro: non si discute se farli, si sceglie solo cosa fare (e lo dice già l'agenda).</li>
       <li><strong>Prima il blocco, poi il tempo libero.</strong> La TV non è il nemico: è il premio. Se la guardi <em>dopo</em> il blocco
         serale te la godi senza sensi di colpa; se la guardi <em>al posto</em> del blocco ti rovina la serata e la settimana.</li>
+      <li><strong>Un blocco libero è un blocco per portarsi avanti.</strong> Se mattina o sera non hanno niente in programma,
+        l'agenda ti propone il prossimo passo. Un'ora anticipata stasera è un'ora di respiro sabato.</li>
       <li><strong>Iniziare è la parte difficile: 25 minuti.</strong> Premi ▶ e impegnati solo per 25 minuti, telefono lontano.
         Dopo puoi smettere: quasi sempre continuerai.</li>
       <li><strong>Una cosa alla volta.</strong> Il riquadro "Adesso" ti mostra una sola cosa: quella. Il resto della settimana lo guardi
@@ -1169,7 +1300,7 @@ function parseSheet(rows, name) {
 function sheetTitle(f) {
   if (f.type === 'presidenza') return 'Presidenza del culto';
   if (meaningfulPassage(f.passage)) return f.passage;
-  return f.passage ? 'Predica a tema libero' : 'Predica (brano da definire)';
+  return f.passage ? 'Predica a tema libero' : 'Predica (brano non ancora assegnato)';
 }
 
 async function syncSheet({ silent = false } = {}) {
@@ -1202,6 +1333,7 @@ async function syncSheet({ silent = false } = {}) {
         if (f.passage !== undefined) ev.passage = f.passage;
         if (f.info !== undefined) ev.info = f.info;
         if (ev.titleAuto) ev.title = sheetTitle(f);
+        if (f.passage) ev.steps.forEach(st => { if (st.auto === 'missing' && !st.done) setDone(st, true); });
         if (JSON.stringify([ev.passage, ev.info, ev.title]) !== before) changed++;
       }
     }
@@ -1544,12 +1676,14 @@ function openFocus(x, minutes) {
         el.textContent = 'Tempo! 🎉';
         el.classList.add('over');
         beep();
+        state.sessions = [...state.sessions, { at: new Date().toISOString(), minutes }].slice(-300);
+        save();
       }
     };
     tick();
     focusTimer = setInterval(tick, 1000);
     root.querySelector('#focus-done').addEventListener('click', () => {
-      x.item.done = true;
+      setDone(x.item, true);
       save(); closeModal(); render();
       toast('Fatto! Un passo in meno 💪');
     });
@@ -1777,6 +1911,7 @@ function importData(file) {
     if (!Array.isArray(data.events)) throw new Error('formato');
     if (!confirm('Sostituire tutti i dati attuali con quelli del backup?')) return;
     state = normalize(data);
+    migrate(); rebalanceAll();
     save(); render(); toast('Dati ripristinati');
   }).catch(() => alert('Il file non sembra un backup valido.'));
 }
@@ -1792,6 +1927,7 @@ function saveTemplates() {
         when: r.querySelector('.tpl-when').value,
         heavy: r.querySelector('.tpl-heavy-cb').checked,
         ...(r.dataset.iffree ? { ifFree: true } : {}),
+        ...(r.dataset.ifmissing ? { ifMissing: true } : {}),
       }))
       .filter(s => s.label)
       .sort((a, b) => b.offset - a.offset);
@@ -1827,7 +1963,7 @@ document.addEventListener('click', e => {
     }
     case 'quick-done': {
       const x = taskFromRef(el);
-      if (x) { x.item.done = true; save(); render(); toast('Fatto! Avanti col prossimo 💪'); }
+      if (x) { setDone(x.item, true); save(); render(); toast('Fatto! Avanti col prossimo 💪'); }
       break;
     }
     case 'cycle-when': {
@@ -1887,7 +2023,7 @@ document.addEventListener('change', e => {
   if (el.matches('[data-action="toggle-task"]')) {
     const it = taskFromEl(el);
     if (!it) return;
-    it.done = el.checked;
+    setDone(it, el.checked);
     save(); render();
     if (modalRefresh) modalRefresh();
     if (it.done && el.dataset.kind === 'step') {
@@ -1940,6 +2076,7 @@ async function boot() {
     }
   }
   applySeed();
+  migrate();
   rebalanceAll();
   save();
   render();

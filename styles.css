@@ -473,3 +473,26 @@ code { background: #efeae1; padding: 1px 5px; border-radius: 4px; font-size: 13p
 @media (max-width: 800px) {
   .method-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- Abitudini e "portati avanti" ---------- */
+
+.habits {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 18px; margin-bottom: 14px;
+}
+.habit { display: flex; align-items: center; gap: 14px; padding: 3px 0; }
+.habit-name { width: 96px; font-size: 14px; font-weight: 600; }
+.chain { display: flex; gap: 5px; }
+.chain i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); background: transparent; }
+.chain i.on { background: var(--ok); border-color: var(--ok); }
+.chain i.off { border-color: #e7b4ab; background: var(--late-soft); }
+.chain i.today { border-color: var(--accent); border-style: dashed; }
+.chain i.rest { border-color: transparent; background: #efeae1; transform: scale(.55); }
+.habit-streak { font-size: 13px; color: var(--ok); font-weight: 600; }
+.habits .hint { margin-top: 6px; }
+
+.task.suggest { border-style: dashed; background: #fbfaf6; }
+.suggest-tag { color: var(--accent); font-weight: 600; font-size: 13px; }
+
+.now-preview { margin: 6px 0 0; font-size: 16px; }
+.now-preview span { opacity: .75; font-size: 14px; }
