@@ -48,6 +48,8 @@ const DEFAULT_TEMPLATES = {
     { label: 'Preparare lo studio: schema e domande', offset: 2, when: 'mattina', heavy: true },
     { label: 'Ripasso dello studio', offset: 1, when: 'sera' },
   ]},
+  // Niente da preparare: segna solo i blocchi della giornata che ti toglie (es. un incontro di sera).
+  occupato: { label: 'Occupato', icon: '⏳', color: '#7B7F8E', steps: [] },
   altro: { label: 'Altro', icon: '📌', color: '#6b6b6b', steps: [] },
 };
 
@@ -88,6 +90,8 @@ function normalize(s) {
     studies: (s.studies || []).map(p => ({ kind: 'pages', ...p })),
     templates,
     settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
+    recurring: s.recurring || [],
+    notices: s.notices || [],
     plannedWeeks: s.plannedWeeks || {},
     seedVersion: s.seedVersion || 0,
     schema: s.schema || 0,
@@ -99,7 +103,7 @@ function normalize(s) {
 }
 
 // Aggiornamenti dei dati tra una versione e l'altra (girano anche sul sito, dove seed.js non c'è).
-const SCHEMA = 5;
+const SCHEMA = 6;
 function migrate() {
   const t = today();
   if (state.schema < 3) {
@@ -123,6 +127,10 @@ function migrate() {
         ev.title = ev.title.replace(/^Giovanissimi · /, '');
       }
     }
+  }
+  if (state.schema < 6) {
+    // v6: gli incontri dei giovanissimi si chiamano col brano di riferimento, al posto del titolo
+    for (const ev of state.events) if (ev.type === 'giovanissimi' && ev.passage) ev.title = ev.passage;
   }
   state.schema = SCHEMA;
 }
@@ -419,7 +427,7 @@ function setDone(item, done) {
   item.doneAt = done ? new Date().toISOString() : null;
 }
 
-function createEvent({ type, date, title, notes, time, passage }) {
+function createEvent({ type, date, title, notes, time, passage, blocks }) {
   const ev = {
     id: uid(), type, date,
     time: time || tpl(type).time || '',
@@ -428,6 +436,7 @@ function createEvent({ type, date, title, notes, time, passage }) {
     notes: notes || '',
     steps: planSteps(type, date, passage).map(stepFrom),
   };
+  if (type === 'occupato') ev.blocks = blocks && blocks.length ? blocks : [blockOfTime(ev.time) || 'sera'];
   state.events.push(ev);
   return ev;
 }
@@ -476,9 +485,14 @@ const dayWeight = d => {
 const busyMorning = d => state.events.some(ev => !ev.notMine && ev.steps.some(st => st.heavy && st.when === 'mattina' && st.due === d));
 
 // Un impegno con orario occupa il blocco in cui cade: dalle 17 la sera (es. giovanissimi 19:30–22),
-// prima delle 12 la mattina. Vale anche per gli incontri guidati da altri: ci sei comunque.
-const eventInBlock = (d, slot) => state.events.find(ev => ev.date === d && ev.time
-  && (slot === 'sera' ? ev.time >= '17:00' : slot === 'mattina' ? ev.time < '12:00' : false));
+// prima delle 12 la mattina, in mezzo il pomeriggio. Gli impegni "Occupato" dicono loro quali blocchi
+// prendono (anche tutto il giorno). Vale anche per gli incontri guidati da altri: ci sei comunque.
+const blockOfTime = time => !time ? '' : time < '12:00' ? 'mattina' : time < '17:00' ? 'pomeriggio' : 'sera';
+const eventBlocks = ev => ev.blocks || (ev.time ? [blockOfTime(ev.time)] : []);
+const eventInBlock = (d, slot) => state.events.find(ev => ev.date === d && eventBlocks(ev).includes(slot));
+const blocksLabel = blocks => blocks.length === 3 ? '⏳ tutto il giorno' : SLOT_ORDER.filter(b => blocks.includes(b)).map(b => WHEN[b]).join(' + ');
+// Come mostrare "quando" è un impegno: l'orario, oppure i blocchi che occupa.
+const evWhen = ev => ev.time ? `ore ${ev.time}` : ev.blocks ? blocksLabel(ev.blocks) : '';
 
 const studyWhen = d => parse(d).getDay() === 0 ? 'pomeriggio'
   : busyMorning(d) || eventInBlock(d, 'mattina') ? 'sera' : 'mattina';
@@ -533,23 +547,180 @@ function schedulePlan(plan, fromDate) {
   }
 }
 
-// Quando cambiano gli impegni, riequilibra le letture dei capitoli futuri senza spostarli di settimana.
-function moveOutOfBusyEvenings() {
+/* ---------- Impegni settimanali ----------
+   Ogni regola (es. "ogni venerdì sera") genera i suoi impegni per le prossime 12 settimane.
+   Una settimana saltata, o spostata a mano, finisce in "skip" e non viene ricreata. */
+
+const RECUR_WEEKS = 12;
+const findRule = id => state.recurring.find(r => r.id === id);
+const occursOn = (r, d) => parse(d).getDay() === r.dow && d >= r.from && (!r.until || d <= r.until) && !r.skip.includes(d);
+
+function expandRecurring() {
   const t = today();
-  for (const ev of state.events) {
-    for (const st of ev.steps) {
-      if (st.done || st.whenSet || st.when !== 'sera' || st.due < t || !eventInBlock(st.due, 'sera')) continue;
-      const prev = addDays(st.due, -1);
-      if (parse(st.due).getDay() === 6) st.when = 'pomeriggio';
-      else if (prev >= t && parse(prev).getDay() !== 0 && !eventInBlock(prev, 'sera')) st.due = prev;
-      else st.when = 'mattina';
+  // Via le date future che la serie non prevede più (interrotta o cambiata)
+  state.events = state.events.filter(ev => {
+    if (!ev.recurId || ev.date < t || ev.detached) return true;
+    const r = findRule(ev.recurId);
+    return r && occursOn(r, ev.date);
+  });
+  const horizon = addDays(t, RECUR_WEEKS * 7);
+  for (const r of state.recurring) {
+    const have = new Set(state.events.filter(ev => ev.recurId === r.id).map(ev => ev.recurDate));
+    for (let d = addDays(t, (r.dow - parse(t).getDay() + 7) % 7); d <= horizon; d = addDays(d, 7)) {
+      if (!occursOn(r, d) || have.has(d)) continue;
+      state.events.push({ id: uid(), type: 'occupato', date: d, time: r.time || '', blocks: [...r.blocks],
+        title: r.title, passage: '', notes: '', steps: [], recurId: r.id, recurDate: d });
     }
   }
 }
 
+function stopRule(r, lastDate) {
+  r.until = lastDate;
+  if (r.until < r.from) state.recurring = state.recurring.filter(x => x !== r);
+}
+
+const unlinkRecurrence = ev => { delete ev.recurId; delete ev.recurDate; delete ev.detached; };
+
+// Dopo aver salvato un impegno "Occupato": crea, aggiorna o interrompe la sua serie settimanale.
+function applyRecurrence(ev, repeat, until, oldDate) {
+  const r = ev.recurId && findRule(ev.recurId);
+  if (ev.type !== 'occupato') {
+    // Diventato un altro tipo di impegno: esce dalla serie, che per il resto continua
+    if (r) r.skip.push(ev.recurDate);
+    return unlinkRecurrence(ev);
+  }
+  if (!repeat) {
+    // Non si ripete più: questo resta, le settimane successive spariscono
+    if (r) stopRule(r, addDays(oldDate, -1));
+    return unlinkRecurrence(ev);
+  }
+  const dow = parse(ev.date).getDay();
+  if (!r) {
+    const rule = { id: uid(), title: ev.title, dow, time: ev.time, blocks: [...ev.blocks], from: ev.date, until: until || '', skip: [] };
+    state.recurring.push(rule);
+    Object.assign(ev, { recurId: rule.id, recurDate: ev.date });
+    return;
+  }
+  Object.assign(r, { title: ev.title, time: ev.time, blocks: [...ev.blocks], until: until || '' });
+  if (ev.date !== oldDate) {
+    if (dow === r.dow) {
+      // Stesso giorno della settimana, settimana diversa: si sposta solo questa volta
+      r.skip.push(ev.recurDate);
+      ev.detached = true;
+    } else {
+      // Altro giorno della settimana: si sposta tutta la serie
+      r.dow = dow;
+      if (ev.date < r.from) r.from = ev.date;
+    }
+    ev.recurDate = ev.date;
+  }
+  for (const o of state.events) {
+    if (o.recurId === r.id && o !== ev && !o.detached && o.date >= today()) Object.assign(o, { title: r.title, time: r.time, blocks: [...r.blocks] });
+  }
+  if (r.until && r.until < r.from) stopRule(r, r.until);
+}
+
+/* ---------- Passi che cadono in un blocco occupato ----------
+   Il passo viene anticipato al primo blocco libero (lun–ven mattina e sera, il sabato anche il
+   pomeriggio, mai la domenica), senza scavalcare il passo precedente dello stesso impegno.
+   "Libero" = nessun impegno, nessun altro passo 💪 se il passo è impegnativo, al massimo due passi.
+   Se non c'è un blocco libero lo mette insieme ad altro; se non c'è proprio spazio resta dov'era.
+   "moved" ricorda la posizione originale: se il blocco si libera, il passo torna lì.
+   Ogni cambiamento diventa un avviso nella pagina della settimana. */
+
+const studyBlocks = d => ({ 0: [], 6: ['mattina', 'pomeriggio', 'sera'] })[parse(d).getDay()] || ['mattina', 'sera'];
+const slotOf = st => st.when || 'mattina';
+const posOf = (d, slot) => `${d}|${WHEN_ORDER[slot]}`;
+const SLOT_END = { mattina: 12, pomeriggio: 19, sera: 22 };
+const slotLabel = (d, slot) => `${fmtShort(d)} ${WHEN[slot]}`;
+
+function stepsIn(d, slot, self) {
+  return state.events.filter(ev => !ev.notMine)
+    .flatMap(ev => ev.steps.filter(x => x !== self && !x.done && x.due === d && slotOf(x) === slot));
+}
+const roomFor = (d, slot, st) => {
+  const there = stepsIn(d, slot, st);
+  return there.length < 2 && !(st.heavy && there.some(x => x.heavy));
+};
+
+// Blocchi prima di (due, slot), dal più vicino al più lontano, fino al giorno notBefore compreso.
+function earlierBlocks(due, slot, notBefore) {
+  const out = [];
+  for (let d = due; d >= notBefore; d = addDays(d, -1)) {
+    for (const s of [...studyBlocks(d)].reverse()) if (d < due || WHEN_ORDER[s] < WHEN_ORDER[slot]) out.push([d, s]);
+  }
+  return out;
+}
+
+function relocateSteps() {
+  const t = today();
+  const hour = new Date().getHours();
+  const steps = state.events.flatMap(ev => ev.notMine ? [] : ev.steps.map(st => ({ ev, st })));
+  const before = new Map(steps.map(({ st }) => [st.id, `${st.due}|${st.when}|${st.stuck || ''}|${!!st.moved}`]));
+  // I passi di oggi già sistemati restano fermi: niente rimescolamenti a giornata iniziata.
+  const movable = st => !st.done && !st.whenSet && !st.pinned && (st.due > t || (st.due === t && !st.moved));
+
+  for (const { st } of steps) {
+    if (!movable(st)) continue;
+    delete st.stuck;
+    if (st.moved && st.moved.due >= t) {
+      st.due = st.moved.due;
+      st.when = st.moved.when;
+      delete st.moved;
+    }
+  }
+
+  const events = state.events.filter(ev => !ev.notMine && ev.steps.length).sort(byDate);
+  for (const ev of events) {
+    let prev = null;
+    const ordered = [...ev.steps].sort((a, b) => {
+      const pa = a.moved || a, pb = b.moved || b;
+      return posOf(pa.due, slotOf(pa)).localeCompare(posOf(pb.due, slotOf(pb)));
+    });
+    for (const st of ordered) {
+      const blocker = movable(st) && eventInBlock(st.due, slotOf(st));
+      if (blocker) {
+        const floor = prev && !prev.done && prev.due >= t ? prev : null;
+        const notBefore = floor ? floor.due : [t, addDays(st.due, -7)].sort()[1];
+        const options = earlierBlocks(st.due, slotOf(st), notBefore).filter(([d, s]) =>
+          !eventInBlock(d, s) && !(d === t && hour >= SLOT_END[s])
+          && !(floor && posOf(d, s) < posOf(floor.due, slotOf(floor))));
+        const pick = options.find(([d, s]) => roomFor(d, s, st)) || options[0];
+        if (pick) {
+          st.moved = { due: st.due, when: slotOf(st), by: blocker.title, byId: blocker.id };
+          if (!roomFor(pick[0], pick[1], st)) st.moved.crowded = true;
+          [st.due, st.when] = pick;
+        } else {
+          st.stuck = blocker.title;
+        }
+      }
+      prev = st;
+    }
+  }
+
+  const changes = [];
+  for (const { ev, st } of steps) {
+    if (before.get(st.id) === `${st.due}|${st.when}|${st.stuck || ''}|${!!st.moved}`) continue;
+    const what = `${tpl(ev.type).icon} ${ev.title}: «${st.label}»`;
+    let text;
+    if (st.stuck) text = `${what} cade ${slotLabel(st.due, slotOf(st))}, ma c'è ${st.stuck} e prima non c'è nessun blocco libero: è rimasto lì, scegli tu quando farlo.`;
+    else if (st.moved) text = `${what} spostato da ${slotLabel(st.moved.due, st.moved.when)} a ${slotLabel(st.due, st.when)} (c'è ${st.moved.by})`
+      + (st.moved.crowded ? ': non c\'era un blocco libero, l\'ho messo insieme ad altro.' : '.');
+    else text = `${what} è tornato a ${slotLabel(st.due, slotOf(st))}: il blocco si è liberato.`;
+    state.notices = state.notices.filter(n => n.id !== st.id);
+    state.notices.push({ id: st.id, text, warn: !!(st.stuck || st.moved?.crowded) });
+    changes.push(st);
+  }
+  return changes.length;
+}
+
+// Quando cambiano gli impegni, riequilibra le letture dei capitoli futuri senza spostarli di settimana.
+// Restituisce quanti passi di preparazione sono stati spostati.
 function rebalanceAll() {
   const t = today();
-  moveOutOfBusyEvenings();
+  expandRecurring();
+  const moved = relocateSteps();
+  if (moved) toast(`🔁 Ho riorganizzato ${plural(moved, 'passo', 'passi')}: i dettagli sono negli avvisi della settimana`);
   for (const plan of state.studies) {
     if (plan.kind !== 'chapters') continue;
     for (const ch of plan.chapters) {
@@ -563,6 +734,7 @@ function rebalanceAll() {
       if (days.length) distribute(ch, days);
     }
   }
+  return moved;
 }
 
 function chapterStatus(p) {
@@ -718,6 +890,8 @@ function taskItem(x, { showDue = false, suggest = false, onDay = null } = {}) {
   if (x.kind === 'step') {
     const t = tpl(x.ev.type);
     label = esc(it.label);
+    if (!it.done && it.moved) label += ` <span class="moved-tag" title="Spostato perché c'è ${esc(it.moved.by)}">↩ da ${esc(slotLabel(it.moved.due, it.moved.when))}</span>`;
+    if (!it.done && it.stuck) label += ` <span class="moved-tag warn">⚠️ c'è ${esc(it.stuck)}: scegli tu quando</span>`;
     chip = `<button class="chip" style="--c:${t.color}" data-action="open-event" data-ev="${x.ev.id}">${t.icon} ${esc(x.ev.title)} · ${rel(x.ev.date)}</button>`;
   } else {
     label = it.exam ? `<strong>${esc(it.title)}</strong>` : `${esc(it.title)} <span class="muted">${sectionPages(it)}</span>`;
@@ -751,7 +925,7 @@ function eventCard(ev) {
       <span class="ev-body">
         <span class="ev-type">${esc(t.label)}</span>
         <span class="ev-title">${esc(ev.title)}</span>
-        <span class="ev-meta">${cap(fmtLong(ev.date))}${ev.time ? ` · ore ${ev.time}` : ''} · <strong>${rel(ev.date)}</strong></span>
+        <span class="ev-meta">${cap(fmtLong(ev.date))}${evWhen(ev) ? ` · ${evWhen(ev)}` : ''}${ev.recurId ? ' · 🔁' : ''} · <strong>${rel(ev.date)}</strong></span>
         ${ev.sheetMissing ? '<span class="ev-warn">⚠️ Non risulta più nel foglio delle prediche: verifica</span>' : ''}
         ${next ? `<span class="ev-next">Prossimo passo: ${esc(next.label)} <em>(${rel(next.due)})</em></span>` : ''}
       </span>
@@ -938,7 +1112,9 @@ function viewSettimana() {
   const giovToChoose = !state.settings.giovChosen && state.events.some(e => e.notMine && e.date >= t);
   const pagePlans = state.studies.filter(p => p.kind !== 'chapters' && !isFinished(p));
   const activeStudies = state.studies.filter(p => !isFinished(p));
-  const later = state.events.filter(e => !e.notMine && e.date > sun && e.date <= addDays(sun, 21)).sort(byDate);
+  const later = state.events.filter(e => !e.notMine && e.type !== 'occupato' && e.date > sun && e.date <= addDays(sun, 21)).sort(byDate);
+  const stepIds = new Set(state.events.flatMap(ev => ev.steps.map(s => s.id)));
+  const notices = state.notices.filter(n => stepIds.has(n.id));
   const needsPlanning = isCurrent && !state.plannedWeeks[weekKey] && tasks.some(x => !x.item.done && x.item.due >= t);
   const nothingAtAll = !state.events.length && !state.studies.length;
 
@@ -980,7 +1156,7 @@ function viewSettimana() {
           ${dayEvents.map(ev => {
             const tp = tpl(ev.type);
             return `<button class="event-pill ${ev.notMine ? 'faint' : ''}" style="--c:${tp.color}" data-action="open-event" data-ev="${ev.id}">
-              ${tp.icon} <strong>${esc(tp.label)}</strong> · ${esc(ev.title)}${ev.time ? ` · ${ev.time}` : ''}${ev.notMine ? ' · <em>guida un altro</em>' : ''}</button>`;
+              ${tp.icon} <strong>${esc(tp.label)}</strong> · ${esc(ev.title)}${ev.time ? ` · ${ev.time}` : ev.blocks ? ` · ${blocksLabel(ev.blocks)}` : ''}${ev.recurId ? ' 🔁' : ''}${ev.notMine ? ' · <em>guida un altro</em>' : ''}</button>`;
           }).join('')}
           ${tasksHtml || sessionHtml ? `<ul class="tasks">${tasksHtml}${sessionHtml}</ul>` : ''}
           ${empty ? '<span class="muted small">Libero</span>' : ''}
@@ -1035,6 +1211,13 @@ function viewSettimana() {
     <div class="week-layout">
       <div class="week-main">
         ${isCurrent ? `<div class="w-1">${nowCard()}</div>` : ''}
+
+        ${isCurrent && notices.length ? `
+          <section class="section notice-section w-8">
+            <h2>🔁 Ho riorganizzato alcuni passi</h2>
+            <ul class="notice-list">${notices.map(n => `<li class="${n.warn ? 'warn' : ''}">${esc(n.text)}</li>`).join('')}</ul>
+            <button data-action="notices-ok">Ok, ho visto</button>
+          </section>` : ''}
 
         ${late.length ? `
           <section class="section late-section w-8">
@@ -1193,7 +1376,7 @@ function nowCard() {
   } else if (h < 22 && eventInBlock(t, 'sera')) {
     // Stasera c'è un incontro: niente blocco serale
     const ev = eventInBlock(t, 'sera');
-    const what = `${tpl(ev.type).icon} ${esc(ev.title)} alle ${ev.time}`;
+    const what = `${tpl(ev.type).icon} ${esc(ev.title)}${ev.time ? ` alle ${ev.time}` : ''}`;
     focus = h < 19 ? pick(slot('mattina')[0], slot('pomeriggio')[0], late[0]) : null;
     if (focus) {
       head = `Stasera c'è ${what}. Se ti è rimasto qualcosa, fallo prima:`;
@@ -1276,7 +1459,7 @@ function viewAgenda() {
         ${evs.map(ev => {
           const tp = tpl(ev.type);
           return `<button class="event-row ${ev.notMine ? 'faint' : ''}" style="--c:${tp.color}" data-action="open-event" data-ev="${ev.id}">
-            <span>${tp.icon}</span><strong>${esc(ev.title)}</strong><span class="muted">${esc(tp.label)}${ev.time ? ` · ${ev.time}` : ''}${ev.notMine ? ' · guida un altro' : ''}</span>
+            <span>${tp.icon}</span><strong>${esc(ev.title)}</strong><span class="muted">${esc(tp.label)}${evWhen(ev) ? ` · ${evWhen(ev)}` : ''}${ev.recurId ? ' · 🔁' : ''}${ev.notMine ? ' · guida un altro' : ''}</span>
             ${healthBadge(eventHealth(ev))}</button>`;
         }).join('')}
         ${st.length ? `<ul class="tasks">${st.map(x => taskItem(x)).join('')}</ul>` : ''}
@@ -1378,7 +1561,7 @@ function viewStudio() {
 
 function viewImpostazioni() {
   const s = state.settings;
-  const cards = Object.entries(state.templates).filter(([k]) => k !== 'altro').map(([k, t]) => `
+  const cards = Object.entries(state.templates).filter(([k]) => k !== 'altro' && k !== 'occupato').map(([k, t]) => `
     <article class="tpl-card" data-type="${k}" style="--c:${t.color}">
       <h3>${t.icon} ${esc(t.label)}</h3>
       <div class="tpl-rows">
@@ -1438,6 +1621,17 @@ function viewImpostazioni() {
           <span class="muted">${s.lastSync ? `Ultimo aggiornamento: ${new Date(s.lastSync).toLocaleString('it-IT', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Mai aggiornato'}</span>
         </div>
       </form>
+    </section>
+
+    <section class="section">
+      <h2>🔁 Impegni settimanali</h2>
+      <p class="muted">Impegni che si ripetono ogni settimana e ti tolgono un blocco della giornata. Si creano da
+        <em>+ Nuovo impegno</em> → ⏳ Occupato → <em>Si ripete ogni settimana</em>.</p>
+      ${state.recurring.length ? `<ul class="plain rule-list">${state.recurring.map(r => `
+        <li><span class="grow"><strong>${esc(r.title)}</strong> · ogni ${fmtWeekday(addDays(mondayOf(today()), (r.dow + 6) % 7))} ·
+          ${blocksLabel(r.blocks)}${r.time ? ` · ore ${r.time}` : ''}${r.until ? ` · fino al ${fmtDM(r.until)}` : ''}</span>
+          <button data-action="recur-stop" data-id="${r.id}">Interrompi</button></li>`).join('')}</ul>`
+        : '<p class="muted">Nessun impegno settimanale.</p>'}
     </section>
 
     <section class="section">
@@ -1714,7 +1908,8 @@ function applySeed() {
       ...(m.questions.length ? ['Domande per il gruppo (facoltative):', ...m.questions] : []),
       ...(m.links.length ? ['', 'Link:', ...m.links] : []),
     ].join('\n');
-    const ev = createEvent({ type: 'giovanissimi', date: m.date, time: m.time, passage: m.passage, notes, title: m.title });
+    // Il titolo dell'incontro è il brano (benvenuto e feste, senza brano, tengono il loro nome)
+    const ev = createEvent({ type: 'giovanissimi', date: m.date, time: m.time, passage: m.passage, notes, title: m.passage || m.title });
     ev.seedKey = key;
     if (isStudy) setMine(ev, false);
     else { ev.noPrep = true; ev.steps = []; } // benvenuto e feste: nessuna preparazione
@@ -1773,6 +1968,8 @@ function typePicker(selected) {
 function openEventForm(ev, presetDate) {
   const isNew = !ev;
   const date = ev ? ev.date : (presetDate || addDays(today(), 7));
+  const rule = ev && ev.recurId && findRule(ev.recurId);
+  const blocks = ev && ev.blocks ? ev.blocks : ['sera'];
   openModal(`
     <form class="form">
       <h2>${isNew ? 'Nuovo impegno' : 'Modifica impegno'}</h2>
@@ -1781,9 +1978,21 @@ function openEventForm(ev, presetDate) {
         <label class="field"><span>Data</span><input type="date" name="date" value="${date}" required></label>
         <label class="field"><span>Ora <small>(facoltativa)</small></span><input type="time" name="time" value="${ev ? esc(ev.time || '') : ''}"></label>
       </div>
+      <div class="occ-fields">
+        <div class="field"><span>Che parte della giornata ti toglie?</span>
+          <div class="block-picker">${SLOT_ORDER.map(b => `
+            <label><input type="checkbox" name="blocks" value="${b}" ${blocks.includes(b) ? 'checked' : ''}> ${WHEN[b]}</label>`).join('')}
+          </div>
+        </div>
+        <div class="field-row">
+          <label class="check"><input type="checkbox" name="repeat" ${rule ? 'checked' : ''}> 🔁 Si ripete ogni settimana</label>
+          <label class="field until-field"><span>Fino al <small>(facoltativo)</small></span><input type="date" name="until" value="${rule ? rule.until || '' : ''}"></label>
+        </div>
+        ${rule ? '<p class="hint">Le modifiche valgono per tutta la serie, da oggi in avanti.</p>' : ''}
+      </div>
       <label class="field"><span>Titolo <small>(facoltativo)</small></span>
         <input name="title" value="${ev ? esc(ev.title) : ''}" placeholder="es. Culto di domenica"></label>
-      <label class="field"><span>Brano <small>(facoltativo)</small></span>
+      <label class="field passage-field"><span>Brano <small>(facoltativo)</small></span>
         <input name="passage" value="${ev ? esc(ev.passage || '') : ''}" placeholder="es. Romani 8:1-11"></label>
       ${isNew ? `<label class="field"><span>Note</span><textarea name="notes" rows="2"></textarea></label>
       <div class="preview" id="ev-preview"></div>` : ''}
@@ -1793,10 +2002,29 @@ function openEventForm(ev, presetDate) {
       </div>
     </form>`, form => {
     const preview = form.querySelector('#ev-preview');
+    const blockBoxes = [...form.querySelectorAll('[name=blocks]')];
+    const chosenBlocks = () => blockBoxes.filter(b => b.checked).map(b => b.value);
+    // Campi dell'impegno "Occupato" (blocchi, ripetizione) solo per quel tipo; il brano per tutti gli altri
+    const showFields = () => {
+      const occ = form.elements.type.value === 'occupato';
+      form.querySelector('.occ-fields').hidden = !occ;
+      form.querySelector('.passage-field').hidden = occ;
+      form.querySelector('.until-field').hidden = !form.elements.repeat.checked;
+    };
     const update = () => {
+      showFields();
       if (!preview) return;
       const type = form.elements.type.value, d = form.elements.date.value;
       if (!d || !type) { preview.innerHTML = type ? '' : '<p class="muted">Scegli il tipo di impegno per vedere la tabella di marcia.</p>'; return; }
+      if (type === 'occupato') {
+        const bl = chosenBlocks();
+        const hit = allTasks().filter(x => x.kind === 'step' && !x.item.done && !x.ev.notMine && x.item.due === d && bl.includes(slotOf(x.item)));
+        preview.innerHTML = hit.length ? `
+          <p class="preview-title">Questi passi cadono lì: li anticipo io al primo blocco libero.</p>
+          <ul>${hit.map(x => `<li><span class="muted">${WHEN[slotOf(x.item)]}</span> ${esc(x.item.label)} <span class="muted">· ${esc(x.ev.title)}</span></li>`).join('')}</ul>`
+          : '<p class="muted">Nessuna preparazione da fare, e in quel momento non hai passi in programma.</p>';
+        return;
+      }
       const steps = planSteps(type, d, form.elements.passage.value);
       const squeezed = steps.filter(s => s.squeezed).length;
       preview.innerHTML = steps.length ? `
@@ -1807,9 +2035,16 @@ function openEventForm(ev, presetDate) {
     };
     // Orario abituale del tipo scelto, finché non lo cambi a mano
     const timeInput = form.elements.time;
-    timeInput.addEventListener('input', () => { timeInput.dataset.touched = '1'; });
+    timeInput.addEventListener('input', () => {
+      timeInput.dataset.touched = '1';
+      // L'orario suggerisce il blocco occupato, finché non scegli i blocchi a mano
+      const b = blockOfTime(timeInput.value);
+      if (b && !form.dataset.blocksTouched) blockBoxes.forEach(x => { x.checked = x.value === b; });
+    });
+    blockBoxes.forEach(b => b.addEventListener('change', () => { form.dataset.blocksTouched = '1'; }));
     form.addEventListener('change', e => {
       if (e.target.name === 'type' && !timeInput.dataset.touched) timeInput.value = tpl(e.target.value).time || '';
+      update();
     });
     form.addEventListener('input', update);
     update();
@@ -1818,19 +2053,27 @@ function openEventForm(ev, presetDate) {
       const f = form.elements;
       const type = f.type.value, d = f.date.value, title = f.title.value.trim();
       if (!type) return toast('Scegli il tipo di impegno');
+      const blocks = chosenBlocks();
+      if (type === 'occupato' && !blocks.length) return toast('Scegli almeno una parte della giornata');
+      let target, oldDate;
       if (isNew) {
-        const created = createEvent({ type, date: d, title, notes: f.notes.value, time: f.time.value, passage: f.passage.value.trim() });
-        rebalanceAll(); save(); render();
-        toast('Impegno creato');
-        openEventDetail(created.id);
+        target = createEvent({ type, date: d, title, notes: f.notes.value, time: f.time.value, passage: f.passage.value.trim(), blocks });
       } else {
+        oldDate = ev.date;
         const shift = diffDays(ev.date, d);
-        if (shift) ev.steps.forEach(s => { s.due = addDays(s.due, shift); });
+        if (shift) ev.steps.forEach(s => { s.due = addDays(s.due, shift); if (s.moved) s.moved.due = addDays(s.moved.due, shift); });
         if (title !== ev.title) ev.titleAuto = false;
-        Object.assign(ev, { type, date: d, time: f.time.value, passage: f.passage.value.trim(), title: title || tpl(type).label });
-        save(); render();
-        openEventDetail(ev.id);
+        // Giovanissimi: se il titolo era il brano, segue il brano nuovo
+        const passage = f.passage.value.trim();
+        const newTitle = type === 'giovanissimi' && passage && title === ev.passage ? passage : title;
+        Object.assign(ev, { type, date: d, time: f.time.value, passage, title: newTitle || tpl(type).label });
+        if (type === 'occupato') ev.blocks = blocks; else delete ev.blocks;
+        target = ev;
       }
+      if (type === 'occupato' || target.recurId) applyRecurrence(target, f.repeat.checked, f.until.value, oldDate || d);
+      const moved = rebalanceAll(); save(); render();
+      if (!moved) toast(isNew ? 'Impegno creato' : 'Impegno salvato');
+      openEventDetail(target.id);
     });
   });
 }
@@ -1841,12 +2084,15 @@ function openEventDetail(id) {
   const t = tpl(ev.type);
   const td = today();
   const defaultDue = ev.date < td ? ev.date : td;
+  const occ = ev.type === 'occupato';
+  const rule = ev.recurId && findRule(ev.recurId);
+  const pushed = state.events.flatMap(e => e.steps.filter(s => !s.done && s.moved && s.moved.byId === ev.id).map(s => ({ e, s })));
   openModal(`
     <div class="detail" style="--c:${t.color}">
       <div class="detail-head">
         <span class="detail-icon">${t.icon}</span>
         <div class="grow">
-          <p class="eyebrow">${esc(t.label)} · ${fmtLong(ev.date)}${ev.time ? ` · ore ${ev.time}` : ''} (${rel(ev.date)})</p>
+          <p class="eyebrow">${esc(t.label)} · ${fmtLong(ev.date)}${evWhen(ev) ? ` · ${evWhen(ev)}` : ''} (${rel(ev.date)})</p>
           <h2>${esc(ev.title)}</h2>
           ${ev.passage && ev.passage !== ev.title ? `<p class="detail-passage">📖 ${esc(ev.passage)}</p>` : ''}
           ${ev.info ? `<p class="muted">${esc(ev.info)}</p>` : ''}
@@ -1856,6 +2102,13 @@ function openEventDetail(id) {
         ${healthBadge(eventHealth(ev))}
       </div>
 
+      ${occ ? `
+      <h3>Cosa cambia</h3>
+      <p>Ti toglie <strong>${blocksLabel(eventBlocks(ev))}</strong>: niente da preparare.${rule ? ` 🔁 Si ripete ogni ${fmtWeekday(ev.date)}${rule.until ? `, fino al ${fmtDM(rule.until)}` : ''}.` : ''}</p>
+      ${pushed.length ? `<p class="muted">Passi spostati per lasciarti libero:</p>
+        <ul class="plain moved-list">${pushed.map(({ e, s }) => `<li>${tpl(e.type).icon} ${esc(s.label)}
+          <span class="muted">· ${esc(e.title)} · da ${esc(slotLabel(s.moved.due, s.moved.when))} a ${esc(slotLabel(s.due, s.when))}</span></li>`).join('')}</ul>`
+        : '<p class="muted">In quel momento non avevi passi di preparazione: nessuno spostamento.</p>'}` : `
       <h3>Tabella di marcia</h3>
       ${ev.notMine ? '<p class="muted">Questo incontro lo guida un altro: nessuna preparazione da fare.</p>' : ev.steps.length ? `<ul class="tasks">${sortedSteps(ev).map(st => {
         const x = { kind: 'step', ev, item: st };
@@ -1876,14 +2129,16 @@ function openEventDetail(id) {
         <input name="label" placeholder="Aggiungi un passo…" required>
         <input type="date" name="due" value="${defaultDue}" required>
         <button>Aggiungi</button>
-      </form>
+      </form>`}
 
       <h3>Appunti</h3>
       <textarea class="notes" rows="9" placeholder="Brano, schema, idee, riferimenti…">${esc(ev.notes)}</textarea>
       <p class="hint">Gli appunti si salvano da soli.</p>
 
       <div class="form-actions">
-        <button class="danger-link" data-del-event>Elimina impegno</button>
+        ${rule ? `<button class="danger-link" data-skip-event>Salta questa settimana</button>
+        <button class="danger-link" data-stop-series>Interrompi la serie</button>`
+          : '<button class="danger-link" data-del-event>Elimina impegno</button>'}
         <span class="grow"></span>
         <button data-edit-event>Modifica</button>
         <button class="primary" data-close>Chiudi</button>
@@ -1898,24 +2153,40 @@ function openEventDetail(id) {
     });
     root.querySelectorAll('.due-input').forEach(inp => inp.addEventListener('change', () => {
       const st = ev.steps.find(s => s.id === inp.dataset.st);
-      if (st && inp.value) { st.due = inp.value; save(); render(); openEventDetail(ev.id); }
+      // Data scelta a mano: il passo resta lì, anche se poi arriva un impegno
+      if (st && inp.value) { st.due = inp.value; st.pinned = true; delete st.moved; delete st.stuck; save(); render(); openEventDetail(ev.id); }
     }));
     root.querySelectorAll('[data-del-step]').forEach(b => b.addEventListener('click', () => {
       ev.steps = ev.steps.filter(s => s.id !== b.dataset.delStep);
       save(); render(); openEventDetail(ev.id);
     }));
-    root.querySelector('.add-step').addEventListener('submit', e => {
+    root.querySelector('.add-step')?.addEventListener('submit', e => {
       e.preventDefault();
       const f = e.target.elements;
       ev.steps.push({ id: uid(), label: f.label.value.trim(), due: f.due.value, done: false, when: '' });
       save(); render(); openEventDetail(ev.id);
     });
-    root.querySelector('[data-del-event]').addEventListener('click', () => {
+    root.querySelector('[data-del-event]')?.addEventListener('click', () => {
       const fromSheet = ev.sheetKey && !ev.sheetMissing
         ? '\n\nAttenzione: è nel foglio delle prediche, al prossimo aggiornamento verrà ricreato.' : '';
       if (!confirm(`Eliminare "${ev.title}" con tutti i suoi passi e appunti?${fromSheet}`)) return;
       state.events = state.events.filter(e => e.id !== ev.id);
-      save(); render(); closeModal(); toast('Impegno eliminato');
+      const moved = rebalanceAll(); save(); render(); closeModal();
+      if (!moved) toast('Impegno eliminato');
+    });
+    // Impegni settimanali: saltare una settimana, o fermare la serie da qui in avanti
+    root.querySelector('[data-skip-event]')?.addEventListener('click', () => {
+      rule.skip.push(ev.recurDate);
+      state.events = state.events.filter(e => e.id !== ev.id);
+      const moved = rebalanceAll(); save(); render(); closeModal();
+      if (!moved) toast(`Saltato: ${fmtLong(ev.date)}`);
+    });
+    root.querySelector('[data-stop-series]')?.addEventListener('click', () => {
+      if (!confirm(`Interrompere "${ev.title}"? Spariscono questo e tutti i successivi.`)) return;
+      stopRule(rule, addDays(ev.date, -1));
+      state.events = state.events.filter(e => e.id !== ev.id);
+      const moved = rebalanceAll(); save(); render(); closeModal();
+      if (!moved) toast('Serie interrotta');
     });
     root.querySelector('[data-edit-event]').addEventListener('click', () => openEventForm(ev));
   }, () => openEventDetail(id));
@@ -1931,7 +2202,7 @@ function openGiovChooser() {
         Gli altri restano in calendario come promemoria. Puoi cambiare idea quando vuoi dal dettaglio di ogni incontro.</p>
       <ul class="pick-list">${list.map((ev, i) => `
         <li><label><input type="checkbox" name="pick" value="${ev.id}" data-i="${i}" ${ev.notMine ? '' : 'checked'}>
-          <span class="muted">${fmtShort(ev.date)}</span> ${esc(ev.title)} <span class="muted">· ${esc(ev.passage)}</span></label></li>`).join('')}
+          <span class="muted">${fmtShort(ev.date)}</span> ${esc(ev.title)}${ev.passage && ev.passage !== ev.title ? ` <span class="muted">· ${esc(ev.passage)}</span>` : ''}</label></li>`).join('')}
       </ul>
       <button type="button" class="link" id="alternate">↔ Uno sì e uno no, a partire dal primo spuntato</button>
       <div class="form-actions">
@@ -2033,6 +2304,7 @@ function detectType(s) {
   if (/presiede|presiden|conduzion/.test(l)) return 'presidenza';
   if (/giovan|ragazz|adolesc/.test(l)) return 'giovanissimi';
   if (/chiesa|casa|cellul/.test(l)) return 'chiesa';
+  if (/occupat|riunion|impegnat|cena|fuori/.test(l)) return 'occupato';
   return 'altro';
 }
 
@@ -2059,7 +2331,8 @@ function openQuickAdd() {
     <form class="form">
       <h2>Inserimento rapido</h2>
       <p class="muted">Un impegno per riga: <strong>giorno/mese</strong> seguito dal tipo.
-        Il tipo viene riconosciuto dalle parole (predica, presidenza, giovanissimi, chiesa in casa).</p>
+        Il tipo viene riconosciuto dalle parole (predica, presidenza, giovanissimi, chiesa in casa;
+        "occupato" o "riunione" per una sera in cui non puoi lavorare).</p>
       <textarea name="text" rows="8" placeholder="23/10 chiesa in casa da Marco e Anna&#10;6/11 chiesa in casa"></textarea>
       <div class="preview" id="qa-preview"></div>
       <div class="form-actions">
@@ -2084,7 +2357,7 @@ function openQuickAdd() {
       e.preventDefault();
       const ok = rows.filter(r => !r.error && !r.dup);
       ok.forEach(r => createEvent(r));
-      save(); render(); closeModal();
+      rebalanceAll(); save(); render(); closeModal();
       toast(`${plural(ok.length, 'impegno aggiunto', 'impegni aggiunti')}`);
     });
   });
@@ -2291,6 +2564,15 @@ document.addEventListener('click', e => {
       save(); render(); toast('Settimana pianificata. Ora un passo alla volta 💪');
       break;
     case 'giov-choose': openGiovChooser(); break;
+    case 'notices-ok': state.notices = []; save(); render(); break;
+    case 'recur-stop': {
+      const r = findRule(id);
+      if (r && confirm(`Interrompere "${r.title}"? Spariscono tutte le prossime settimane.`)) {
+        stopRule(r, addDays(today(), -1));
+        rebalanceAll(); save(); render();
+      }
+      break;
+    }
     case 'cloud-disconnect': cloudDisconnect(); break;
     case 'cloud-share':
       openCloudShare().catch(err => alert(`Non riesco a creare il codice: ${err.message}.`));
@@ -2315,6 +2597,8 @@ document.addEventListener('click', e => {
       const it = taskFromEl(el);
       if (it) {
         it.whenSet = true;
+        delete it.moved;
+        delete it.stuck;
         it.when = WHEN_CYCLE[(WHEN_CYCLE.indexOf(it.when || '') + 1) % WHEN_CYCLE.length];
         save(); render();
         if (modalRefresh) modalRefresh();
