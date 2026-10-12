@@ -564,7 +564,7 @@ code { background: var(--surface-3); padding: 1px 5px; border-radius: 4px; font-
 /* Larghezza per pagina: la settimana e il calendario usano tutto lo schermo,
    le pagine da leggere restano strette perché righe lunghe stancano. */
 main[data-view="settimana"], main[data-view="calendario"] { max-width: 2400px; }
-main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni"] { max-width: 1360px; }
+main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni"], main[data-view="tempo"] { max-width: 1360px; }
 
 /* Settimana: su schermi stretti una colonna sola, nell'ordine w-1 … w-12 */
 .week-layout { display: flex; flex-direction: column; gap: 22px; }
@@ -698,3 +698,83 @@ main[data-view="agenda"], main[data-view="studio"], main[data-view="impostazioni
 .rule-list li { padding: 6px 0; border-top: 1px solid var(--line); }
 .rule-list li:first-child { border-top: none; }
 .rule-list .grow { flex: 1; }
+
+/* ---------- Cronometro ---------- */
+
+.timer-bar {
+  position: fixed; right: 20px; bottom: 20px; z-index: 20;
+  display: flex; align-items: center; gap: 10px; max-width: min(620px, calc(100vw - 40px));
+  background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--c);
+  border-radius: var(--radius); padding: 8px 10px 8px 14px; box-shadow: 0 6px 24px var(--shadow), 0 1px 3px var(--shadow);
+}
+.timer-bar[hidden] { display: none; }
+.timer-what {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: none; background: none; padding: 4px 2px; text-align: left; font-size: 14.5px; color: inherit;
+}
+.timer-bar .timer-clock { font-variant-numeric: tabular-nums; font-weight: 700; margin-right: 6px; }
+.timer-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--late); flex-shrink: 0; animation: timer-pulse 1.6s ease-in-out infinite; }
+@keyframes timer-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .timer-dot { animation: none; } }
+main { padding-bottom: 110px; }
+@media (max-width: 800px) {
+  .timer-bar { left: 10px; right: 10px; bottom: 10px; max-width: none; }
+}
+
+.card-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.timer-btn { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.timer-btn small { font-size: 12px; }
+.form-actions .timer-btn { flex-direction: row; align-items: center; gap: 8px; }
+.plain-pick li { padding: 0; }
+.pick-btn { display: block; width: 100%; text-align: left; border: none; background: none; padding: 9px 12px; border-radius: 0; }
+.pick-btn:hover { background: var(--surface-2); }
+.form h3 { margin: 16px 0 0; font-size: 15px; }
+
+/* ---------- Pagina Tempo ---------- */
+
+.time-hero {
+  display: flex; align-items: center; gap: 20px 32px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px 22px; margin-bottom: 24px;
+}
+.time-hero p { margin: 0; flex: 1; min-width: 200px; }
+.time-total { display: flex; flex-direction: column; }
+.time-total strong { font-family: var(--serif); font-weight: normal; font-size: 46px; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.time-total span { color: var(--muted); font-size: 14px; }
+.time-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 28px; align-items: start; }
+@media (max-width: 1000px) { .time-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.tbars { display: flex; flex-direction: column; gap: 4px; }
+.tbar-row {
+  display: grid; grid-template-columns: minmax(120px, 2fr) minmax(80px, 3fr) 68px; align-items: center; gap: 12px;
+  padding: 5px 6px; border-radius: 8px;
+}
+.tbar-row:hover { background: var(--surface-2); }
+.tbar-label { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbar-track { height: 12px; }
+.tbar { display: block; height: 100%; background: var(--c); border-radius: 0 4px 4px 0; }
+.tbar-val { font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--c); flex-shrink: 0; }
+.tlegend { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 12px; padding: 0; font-size: 13px; color: var(--muted); }
+.tlegend li { display: inline-flex; align-items: center; gap: 6px; }
+.tdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; border-bottom: 1px solid var(--line-strong); }
+.tday { display: flex; flex-direction: column; align-items: stretch; border-radius: 8px 8px 0 0; padding: 4px 4px 0; }
+.tday:hover { background: var(--surface-2); }
+.tday-val { font-size: 12.5px; text-align: center; min-height: 18px; font-variant-numeric: tabular-nums; }
+.tday-col { height: 150px; display: flex; flex-direction: column; justify-content: flex-end; width: min(36px, 100%); margin: 0 auto; }
+.tday-col i { display: block; background: var(--c); min-height: 3px; }
+.tday-col i + i { border-top: 2px solid var(--surface); }
+.tday-col i:first-child { border-radius: 4px 4px 0 0; }
+.tday-name { font-size: 12.5px; color: var(--muted); text-align: center; padding: 6px 0; }
+.tday.is-today .tday-name { color: inherit; font-weight: 700; }
+
+.ttypes li { gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14.5px; }
+.ttypes li:first-child { border-top: none; }
+.ttypes .grow, .sessions .grow { flex: 1; min-width: 0; }
+.sessions li { gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; flex-wrap: wrap; }
+.sessions li:first-child { border-top: none; }
+.sessions strong { font-variant-numeric: tabular-nums; }
+.sessions li { flex-wrap: nowrap; }
+.sessions .grow { display: flex; flex-direction: column; gap: 1px; }
+.sessions .grow small { font-size: 12.5px; }

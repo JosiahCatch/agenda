@@ -55,6 +55,7 @@ const DEFAULT_TEMPLATES = {
 
 const DEFAULT_SETTINGS = {
   myName: 'Josiah',
+  pauseBeep: false,
   sheetUrl: '',
   lastSync: null,
 };
@@ -96,7 +97,9 @@ function normalize(s) {
     seedVersion: s.seedVersion || 0,
     schema: s.schema || 0,
     habitStart: s.habitStart || null,
-    sessions: s.sessions || [],
+    sessions: (s.sessions || []).map(se => se.id ? se : { id: uid(), ...se }),
+    timer: s.timer || null,
+    lastRef: s.lastRef || null,
     lastBackup: s.lastBackup || null,
     updatedAt: s.updatedAt || null,
   };
@@ -907,7 +910,7 @@ function taskItem(x, { showDue = false, suggest = false, onDay = null } = {}) {
         ${showDue ? `<span class="due ${late ? 'late' : ''}">${late ? 'era per ' : ''}${rel(it.due)}</span>` : ''}
         ${suggest ? `<span class="due">previsto ${fmtShort(it.due)}</span>` : whenChip(x)}
         ${chip}
-        ${!it.done && (it.due <= today() || (suggest && onDay === today())) ? `<button class="play" data-action="focus-start" ${taskRef(x)} title="Inizia ora: 25 minuti di concentrazione">▶</button>` : ''}
+        ${!it.done && (it.due <= today() || (suggest && onDay === today())) ? `<button class="play" data-action="focus-start" ${taskRef(x)} title="Inizia ora: parte il cronometro">▶</button>` : ''}
       </span>
     </li>`;
 }
@@ -978,7 +981,7 @@ function pageCard(p) {
           <h3>📖 ${esc(p.title)}</h3>
           <p class="muted">Sei a ${pos(p, p.current)} di ${p.total} · scadenza ${fmtShort(p.endDate)}${s.finished ? '' : ` (${rel(p.endDate)})`}</p>
         </div>
-        ${status}
+        <div class="card-side">${status}${timerButton(`study:${p.id}`)}</div>
       </header>
       <div class="bar"><span style="width:${pct}%"></span></div>
       ${todayLine}
@@ -1016,7 +1019,7 @@ function chapterCard(p, { full = false, compact = false } = {}) {
           <h3>📖 ${esc(p.title)}</h3>
           <p class="muted">${chDone}/${p.chapters.length} capitoli · ${st.done}/${st.total} letture${st.finished ? '' : ` · fine prevista ${fmtDM(st.end)}`}</p>
         </div>
-        ${status}
+        <div class="card-side">${status}${timerButton(`study:${p.id}`)}</div>
       </header>
       <div class="bar"><span style="width:${pct}%"></span></div>
       ${st.overdue ? `
@@ -1044,6 +1047,17 @@ function chapterCard(p, { full = false, compact = false } = {}) {
           </ol>
         </details>` : ''}
     </article>`;
+}
+
+// Tempo registrato su un impegno o un piano: in totale, o da un certo giorno in poi.
+const minutesOn = (ref, from = '') => sumMin(state.sessions.filter(s => s.ref === ref && sessionDay(s) >= from));
+
+function timerButton(ref) {
+  const running = state.timer && state.timer.ref === ref;
+  const week = minutesOn(ref, mondayOf(today()));
+  return `<span class="timer-btn">
+    ${running ? '<button data-action="timer-open">⏱ In corso</button>' : `<button data-action="timer-start" data-ref="${ref}" title="Fai partire il cronometro">▶ Studia</button>`}
+    ${week ? `<small class="muted">${fmtDur(week)} questa settimana</small>` : ''}</span>`;
 }
 
 const studyCard = (p, opts) => p.kind === 'chapters' ? chapterCard(p, opts) : pageCard(p);
@@ -1095,6 +1109,7 @@ function render() {
   main.dataset.view = view;
   main.innerHTML = VIEWS[view]();
   renderSyncStatus();
+  renderTimer();
 }
 
 function viewSettimana() {
@@ -1434,8 +1449,7 @@ function nowCard() {
             <p class="muted">${context(focus)}${focus.item.due < t ? ` · <span class="late-text">era per ${rel(focus.item.due)}</span>` : ''}${ahead ? ` · previsto ${fmtShort(focus.item.due)}` : ''}</p>
           </div>
           <div class="now-actions">
-            <button class="primary big" data-action="focus-start" data-min="25" ${taskRef(focus)}>▶ Inizia · 25 min</button>
-            <button data-action="focus-start" data-min="50" ${taskRef(focus)}>50 min</button>
+            <button class="primary big" data-action="focus-start" ${taskRef(focus)}>${state.timer && state.timer.step === focus.item.id ? '⏱ In corso' : '▶ Inizia'}</button>
             <button data-action="quick-done" ${taskRef(focus)}>✓ Già fatto</button>
           </div>
         </div>` : ''}
@@ -1557,6 +1571,226 @@ function viewStudio() {
           <button class="danger-link" data-action="delete-study" data-id="${p.id}">Elimina</button></li>`).join('')}</ul>
       </section>` : ''}
   `;
+}
+
+/* ---------- Tempo dedicato ---------- */
+
+// Ordine fisso dei colori nei grafici: così due colori vicini restano distinguibili anche per chi
+// confonde rosso/verde o blu/viola (verificato). "Altro", grigio, sempre per ultimo.
+const TIME_ORDER = ['predica', 'presidenza', 'studio', 'giovanissimi', 'chiesa', 'altro'];
+const timeTypeOf = type => TIME_ORDER.includes(type) ? type : 'altro';
+let timeWeek = 0;
+
+const sessionDay = s => iso(new Date(s.at));
+const sumMin = list => list.reduce((a, s) => a + s.minutes, 0);
+const hhmm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+function viewTempo() {
+  const t = today();
+  const mon = addDays(mondayOf(t), timeWeek * 7), sun = addDays(mon, 6);
+  const between = (a, b) => state.sessions.filter(s => { const d = sessionDay(s); return d >= a && d <= b; });
+  const week = between(mon, sun).sort((a, b) => b.at.localeCompare(a.at));
+  const total = sumMin(week);
+  const prevTotal = sumMin(between(addDays(mon, -7), addDays(mon, -1)));
+  const title = { 0: 'Questa settimana', [-1]: 'La settimana scorsa' }[timeWeek] || `Settimana del ${fmtDM(mon)}`;
+  const typeOfS = s => timeTypeOf(sessionInfo(s).type);
+
+  const header = `
+    <header class="page-head row">
+      <div>
+        <p class="eyebrow">Tempo dedicato · dal ${fmtDM(mon)} al ${fmtDM(sun)}</p>
+        <h1>${title}</h1>
+      </div>
+      <div class="btn-group">
+        <button data-action="time-prev" title="Settimana precedente">‹</button>
+        <button data-action="time-today">Oggi</button>
+        <button data-action="time-next" title="Settimana successiva">›</button>
+      </div>
+    </header>`;
+
+  const diff = total - prevTotal;
+  const delta = !total && !prevTotal ? ''
+    : !prevTotal ? 'La settimana prima non avevi registrato tempo.'
+    : Math.abs(diff) < 5 ? 'Come la settimana prima.'
+    : `${diff > 0 ? '▲' : '▼'} ${fmtDur(Math.abs(diff))} rispetto alla settimana prima (${fmtDur(prevTotal)}).`;
+  const hero = `
+    <section class="time-hero">
+      <div class="time-total"><strong>${total ? fmtDur(total) : '0 min'}</strong><span>di lavoro e studio</span></div>
+      ${delta ? `<p class="muted">${delta}</p>` : ''}
+      <div class="btn-row">
+        <button class="primary" data-action="timer-pick">⏱ Studia</button>
+        <button data-action="session-add">+ Aggiungi a mano</button>
+      </div>
+    </section>`;
+
+  const settings = `
+    <section class="section">
+      <label class="check"><input type="checkbox" id="pause-beep" ${state.settings.pauseBeep ? 'checked' : ''}>
+        🔔 Suono ogni ${PAUSE_EVERY} minuti, per ricordarmi la pausa</label>
+    </section>`;
+
+  // Quanto richiede in media un impegno di ogni tipo (impegni già passati, tutto lo storico)
+  const perEvent = new Map();
+  for (const s of state.sessions) if (s.ref && s.ref.startsWith('ev:')) perEvent.set(s.ref, (perEvent.get(s.ref) || 0) + s.minutes);
+  const avg = {};
+  for (const [ref, min] of perEvent) {
+    const ev = findEvent(ref.slice(3));
+    if (ev && ev.date < t) (avg[ev.type] ||= []).push(min);
+  }
+  const avgTypes = TIME_ORDER.filter(k => avg[k]);
+  const averages = avgTypes.length ? `
+    <section class="section">
+      <h2>Quanto ti richiede, in media</h2>
+      <ul class="plain ttypes">${avgTypes.map(k => {
+        const tp = typeStyle(k), list = avg[k];
+        return `<li style="--c:${tp.color}"><i class="swatch"></i><span class="grow">${tp.icon} ${esc(tp.label)}</span>
+          <strong>${fmtDur(sumMin(list.map(minutes => ({ minutes }))) / list.length)}</strong>
+          <span class="muted">su ${plural(list.length, 'impegno', 'impegni')}</span></li>`;
+      }).join('')}</ul>
+      <p class="hint">Contano gli impegni già passati. Utile per capire quanto prima iniziare.</p>
+    </section>` : '';
+
+  if (!week.length) {
+    return `${header}${hero}${emptyCard(`Nessun tempo registrato ${timeWeek === 0 ? 'in questa settimana' : 'in quella settimana'}.
+      Quando inizi a lavorare su qualcosa premi <strong>⏱ Studia</strong> (o ▶ su un passo): allo stop il tempo viene salvato qui.`)}
+      ${averages}${settings}`;
+  }
+
+  // Per impegno o piano di studio
+  const groups = new Map();
+  for (const s of week) {
+    const key = s.ref || 'none';
+    const info = sessionInfo(s);
+    const g = groups.get(key) || { label: info.label, type: timeTypeOf(info.type), minutes: 0, n: 0 };
+    g.minutes += s.minutes;
+    g.n++;
+    groups.set(key, g);
+  }
+  const items = [...groups.values()].sort((a, b) => b.minutes - a.minutes);
+  const maxItem = items[0].minutes;
+  const byItem = `
+    <section class="section">
+      <h2>Per impegno</h2>
+      <div class="tbars">${items.map(g => {
+        const tp = typeStyle(g.type);
+        return `
+        <div class="tbar-row" style="--c:${tp.color}" title="${esc(g.label)}: ${fmtDur(g.minutes)} in ${plural(g.n, 'sessione', 'sessioni')}">
+          <span class="tbar-label">${tp.icon} ${esc(g.label)}</span>
+          <span class="tbar-track"><span class="tbar" style="width:${Math.max(1.5, (g.minutes / maxItem) * 100)}%"></span></span>
+          <span class="tbar-val">${fmtDur(g.minutes)}</span>
+        </div>`;
+      }).join('')}</div>
+    </section>`;
+
+  // Giorno per giorno, diviso per tipo
+  const typesHere = TIME_ORDER.filter(k => week.some(s => typeOfS(s) === k));
+  const days = [...Array(7)].map((_, i) => {
+    const d = addDays(mon, i);
+    const list = week.filter(s => sessionDay(s) === d);
+    return { d, total: sumMin(list), parts: typesHere.map(k => ({ k, min: sumMin(list.filter(s => typeOfS(s) === k)) })).filter(p => p.min) };
+  });
+  const maxDay = Math.max(60, ...days.map(x => x.total));
+  const legend = typesHere.length > 1 ? `<ul class="tlegend">${typesHere.map(k => {
+    const tp = typeStyle(k);
+    return `<li style="--c:${tp.color}"><i class="swatch"></i>${tp.icon} ${esc(tp.label)}</li>`;
+  }).join('')}</ul>` : '';
+  const byDay = `
+    <section class="section">
+      <h2>Giorno per giorno</h2>
+      ${legend}
+      <div class="tdays">${days.map(x => `
+        <div class="tday ${x.d === t ? 'is-today' : ''}" title="${esc(cap(fmtLong(x.d)))}: ${x.total ? fmtDur(x.total) : 'niente'}${x.parts.map(p => `&#10;${esc(typeStyle(p.k).label)}: ${fmtDur(p.min)}`).join('')}">
+          <span class="tday-val">${x.total ? fmtDur(x.total) : ''}</span>
+          <span class="tday-col">${[...x.parts].reverse().map(p => `<i style="--c:${typeStyle(p.k).color};height:${(p.min / maxDay) * 100}%"></i>`).join('')}</span>
+          <span class="tday-name">${DOW[parse(x.d).getDay()]} ${parse(x.d).getDate()}</span>
+        </div>`).join('')}</div>
+    </section>`;
+
+  const byType = `
+    <section class="section">
+      <h2>Per tipo</h2>
+      <ul class="plain ttypes">${typesHere.map(k => {
+        const tp = typeStyle(k), min = sumMin(week.filter(s => typeOfS(s) === k));
+        return `<li style="--c:${tp.color}"><i class="swatch"></i><span class="grow">${tp.icon} ${esc(tp.label)}</span>
+          <strong>${fmtDur(min)}</strong><span class="muted">${Math.round((min / total) * 100)}%</span></li>`;
+      }).join('')}</ul>
+    </section>`;
+
+  const sessions = `
+    <section class="section">
+      <h2>Sessioni</h2>
+      <ul class="plain sessions">${week.map(s => {
+        const info = sessionInfo(s), tp = typeStyle(timeTypeOf(info.type)), at = new Date(s.at);
+        return `<li>
+          <span class="grow">${tp.icon} ${esc(info.label)}
+            <small class="muted">${fmtShort(sessionDay(s))} · ${hhmm(at)}–${hhmm(new Date(at.getTime() + s.minutes * 60000))}</small></span>
+          <strong>${fmtDur(s.minutes)}</strong>
+          <button class="icon-btn" data-action="session-edit" data-id="${s.id}" title="Correggi">✎</button>
+          <button class="icon-btn" data-action="session-delete" data-id="${s.id}" title="Elimina">✕</button>
+        </li>`;
+      }).join('')}</ul>
+    </section>`;
+
+  return `${header}${hero}
+    <div class="time-grid">
+      <div>${byItem}${byDay}</div>
+      <div>${byType}${averages}${sessions}${settings}</div>
+    </div>`;
+}
+
+// Aggiungi o correggi una sessione a mano (es. "ieri 40 minuti di Wright, senza cronometro").
+function openSessionForm(s) {
+  const t = today();
+  const at = s ? new Date(s.at) : new Date(Date.now() - 3600000);
+  const evs = state.events.filter(e => !e.notMine && !e.noPrep && e.steps.length && e.date >= addDays(t, -60) && e.date <= addDays(t, 60)).sort(byDate);
+  const opts = [
+    ...evs.map(e => [`ev:${e.id}`, `${tpl(e.type).icon} ${e.title} · ${fmtDM(e.date)}`]),
+    ...state.studies.map(p => [`study:${p.id}`, `📖 ${p.title}`]),
+  ];
+  if (s && s.ref && !s.ref.startsWith('other:') && !opts.some(o => o[0] === s.ref) && refInfo(s.ref)) opts.unshift([s.ref, refInfo(s.ref).label]);
+  const isOther = s && (!s.ref || s.ref.startsWith('other:'));
+  const sel = s ? (isOther ? 'other' : s.ref) : (state.lastRef && !state.lastRef.ref.startsWith('other:') ? state.lastRef.ref : '');
+  openModal(`
+    <form class="form">
+      <h2>${s ? 'Correggi la sessione' : 'Aggiungi tempo a mano'}</h2>
+      <label class="field"><span>Su cosa hai lavorato?</span>
+        <select name="ref" required>
+          <option value="" disabled ${sel ? '' : 'selected'}>Scegli…</option>
+          ${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+          <option value="other" ${sel === 'other' ? 'selected' : ''}>Altro…</option>
+        </select></label>
+      <label class="field other-field"><span>Cosa?</span>
+        <input name="other" value="${isOther ? esc(sessionInfo(s).label) : ''}" placeholder="es. Lettura della Bibbia"></label>
+      <div class="field-row">
+        <label class="field"><span>Giorno</span><input type="date" name="date" value="${iso(at)}" required></label>
+        <label class="field"><span>Inizio</span><input type="time" name="time" value="${hhmm(at)}" required></label>
+        <label class="field"><span>Minuti</span><input type="number" name="minutes" min="1" max="720" value="${s ? s.minutes : 30}" required></label>
+      </div>
+      <div class="form-actions">
+        <button type="button" data-close>Annulla</button>
+        <button class="primary">${s ? 'Salva' : 'Aggiungi'}</button>
+      </div>
+    </form>`, form => {
+    const f = form.elements;
+    const other = form.querySelector('.other-field');
+    const show = () => { other.hidden = f.ref.value !== 'other'; };
+    f.ref.addEventListener('change', show);
+    show();
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const label = f.other.value.trim();
+      if (f.ref.value === 'other' && !label) return toast('Scrivi su cosa hai lavorato');
+      const ref = f.ref.value === 'other' ? `other:${label}` : f.ref.value;
+      const fields = { at: new Date(`${f.date.value}T${f.time.value}`).toISOString(), minutes: Math.round(+f.minutes.value), ref };
+      if (s) {
+        const info = refInfo(ref);
+        Object.assign(s, fields, { label: info.label, type: info.type });
+        if (s.step && !allTasks().some(x => x.item.id === s.step && taskTimerRef(x) === ref)) s.step = null;
+      } else addSession(fields);
+      save(); closeModal(); render();
+      toast(s ? 'Sessione corretta' : `Aggiunti ${fmtDur(fields.minutes)}`);
+    });
+  });
 }
 
 function viewImpostazioni() {
@@ -1704,8 +1938,8 @@ function viewMetodo() {
         serale te la godi senza sensi di colpa; se la guardi <em>al posto</em> del blocco ti rovina la serata e la settimana.</li>
       <li><strong>Un blocco libero è un blocco per portarsi avanti.</strong> Se mattina o sera non hanno niente in programma,
         l'agenda ti propone il prossimo passo. Un'ora anticipata stasera è un'ora di respiro sabato.</li>
-      <li><strong>Iniziare è la parte difficile: 25 minuti.</strong> Premi ▶ e impegnati solo per 25 minuti, telefono lontano.
-        Dopo puoi smettere: quasi sempre continuerai.</li>
+      <li><strong>Iniziare è la parte difficile: 25 minuti.</strong> Premi ▶ (parte il cronometro) e impegnati solo per 25 minuti, telefono lontano.
+        Dopo puoi smettere: quasi sempre continuerai. Quando fai pausa premi Stop: in <em>⏱ Tempo</em> vedi dove va la tua settimana.</li>
       <li><strong>Una cosa alla volta.</strong> Il riquadro "Adesso" ti mostra una sola cosa: quella. Il resto della settimana lo guardi
         solo la domenica sera.</li>
       <li><strong>I passi sono piccoli apposta.</strong> "Preparare la predica" paralizza, "esegesi giorno 2" no. Se un passo ti sembra
@@ -1724,6 +1958,7 @@ const VIEWS = {
   agenda: viewAgenda,
   calendario: viewCalendario,
   studio: viewStudio,
+  tempo: viewTempo,
   impostazioni: viewImpostazioni,
 };
 
@@ -1955,7 +2190,7 @@ function closeModal() {
 modal.addEventListener('click', e => {
   if (e.target === modal || e.target.closest('[data-close]')) closeModal();
 });
-modal.addEventListener('close', () => { modalRefresh = null; stopFocus(); });
+modal.addEventListener('close', () => { modalRefresh = null; });
 
 function typePicker(selected) {
   return `<div class="type-picker">${Object.entries(state.templates).map(([k, t]) => `
@@ -2097,6 +2332,7 @@ function openEventDetail(id) {
           ${ev.passage && ev.passage !== ev.title ? `<p class="detail-passage">📖 ${esc(ev.passage)}</p>` : ''}
           ${ev.info ? `<p class="muted">${esc(ev.info)}</p>` : ''}
           ${ev.sheetMissing ? '<p class="ev-warn">⚠️ Questo impegno non risulta più nel foglio delle prediche: forse è stato spostato o riassegnato.</p>' : ''}
+          ${!occ && !ev.notMine && minutesOn(`ev:${ev.id}`) ? `<p class="muted">⏱ Tempo dedicato: <strong>${fmtDur(minutesOn(`ev:${ev.id}`))}</strong></p>` : ''}
           ${ev.type === 'giovanissimi' && !ev.noPrep ? `<label class="mine-toggle"><input type="checkbox" data-mine ${ev.notMine ? '' : 'checked'}> Lo guido io (crea la tabella di marcia)</label>` : ''}
         </div>
         ${healthBadge(eventHealth(ev))}
@@ -2140,6 +2376,7 @@ function openEventDetail(id) {
         <button class="danger-link" data-stop-series>Interrompi la serie</button>`
           : '<button class="danger-link" data-del-event>Elimina impegno</button>'}
         <span class="grow"></span>
+        ${!occ && !ev.notMine && ev.date >= td ? timerButton(`ev:${ev.id}`) : ''}
         <button data-edit-event>Modifica</button>
         <button class="primary" data-close>Chiudi</button>
       </div>
@@ -2232,7 +2469,16 @@ function openGiovChooser() {
   });
 }
 
-let focusTimer = null;
+/* ---------- Cronometro ----------
+   Il cronometro salva solo l'ora di partenza (state.timer), quindi continua a contare anche se
+   chiudi la pagina, e puoi fermarlo da un altro dispositivo. Allo stop diventa una sessione:
+   { id, at: inizio, minutes, ref, step, label, type }, dove ref = "ev:<id>", "study:<id>" o
+   "other:<testo>". label e type sono una copia: il tempo resta leggibile anche se l'impegno sparisce. */
+
+const LONG_TIMER = 180; // minuti: oltre, ti chiedo se stai ancora lavorando
+const PAUSE_EVERY = 25; // minuti tra un suono e l'altro, se il suono è acceso
+let beepMark = null;
+let longAsked = null;
 
 function beep() {
   try {
@@ -2246,52 +2492,187 @@ function beep() {
   } catch (e) { /* audio non disponibile */ }
 }
 
-function stopFocus() {
-  clearInterval(focusTimer);
-  focusTimer = null;
-  document.title = 'Agenda del servizio';
+const typeStyle = type => type === 'studio' ? { icon: '📖', label: 'Studio personale', color: STUDY_COLOR } : tpl(type);
+
+// Cosa c'è dietro un riferimento, oggi. null se l'impegno o il piano non esistono più.
+function refInfo(ref) {
+  const i = ref.indexOf(':');
+  const kind = ref.slice(0, i), id = ref.slice(i + 1);
+  if (kind === 'ev') {
+    const ev = findEvent(id);
+    return ev && { label: `${ev.title} · ${fmtDM(ev.date)}`, type: ev.type };
+  }
+  if (kind === 'study') {
+    const p = findStudy(id);
+    return p && { label: p.title, type: 'studio' };
+  }
+  return { label: id || 'Altro', type: 'altro' };
 }
 
-function openFocus(x, minutes) {
-  const end = Date.now() + minutes * 60000;
-  const label = x.kind === 'step' ? x.item.label : x.item.title;
-  const context = x.kind === 'step'
-    ? `${tpl(x.ev.type).icon} ${x.ev.title}`
-    : `📖 Cap. ${x.ch.n} · ${x.ch.title} ${sectionPages(x.item)}`;
+const sessionInfo = s => (s.ref && refInfo(s.ref))
+  || { label: s.label || 'Concentrazione (senza attività)', type: s.type || 'altro' };
+
+const taskTimerRef = x => x.kind === 'step' ? `ev:${x.ev.id}` : `study:${x.plan.id}`;
+
+const fmtDur = min => {
+  const m = Math.round(min);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)}h${m % 60 ? ` ${pad(m % 60)}m` : ''}`;
+};
+const fmtClock = ms => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+};
+const timerMs = () => state.timer ? Date.now() - new Date(state.timer.start) : 0;
+
+function startTimer(ref, step = null) {
+  if (state.timer && state.timer.ref === ref && state.timer.step === step) return;
+  if (state.timer) stopTimer();
+  state.timer = { ref, step, start: new Date().toISOString() };
+  save(); render();
+  toast(`⏱ Cronometro partito: ${refInfo(ref).label}`);
+}
+
+// Ferma il cronometro e salva la sessione (se è durata almeno un minuto).
+function stopTimer(end = new Date()) {
+  const tm = state.timer;
+  if (!tm) return 0;
+  const minutes = Math.round((end - new Date(tm.start)) / 60000);
+  state.timer = null;
+  state.lastRef = { ref: tm.ref, step: tm.step };
+  if (minutes >= 1) addSession({ ref: tm.ref, step: tm.step, at: tm.start, minutes });
+  save(); render();
+  return minutes;
+}
+
+function addSession({ ref, step = null, at, minutes }) {
+  const info = refInfo(ref);
+  state.sessions.push({ id: uid(), at, minutes, ref, step, label: info.label, type: info.type });
+}
+
+// Barra fissa in fondo: il cronometro che gira, oppure "Riprendi" dopo una pausa.
+function renderTimer() {
+  const bar = document.getElementById('timer-bar');
+  if (!bar) return;
+  const tm = state.timer;
+  const info = tm ? refInfo(tm.ref) : state.lastRef && refInfo(state.lastRef.ref);
+  bar.hidden = !info;
+  if (!info) return;
+  const tp = typeStyle(info.type);
+  bar.style.setProperty('--c', tp.color);
+  bar.classList.toggle('running', !!tm);
+  bar.innerHTML = tm ? `
+    <span class="timer-dot" aria-hidden="true"></span>
+    <button class="timer-what" data-action="timer-open" title="Apri il cronometro">
+      <span class="timer-clock">${fmtClock(timerMs())}</span> ${tp.icon} ${esc(info.label)}</button>
+    <button class="primary" data-action="timer-stop">■ Stop</button>` : `
+    <span class="timer-what">⏸ In pausa · ${tp.icon} ${esc(info.label)}</span>
+    <button class="primary" data-action="timer-resume">▶ Riprendi</button>
+    <button class="icon-btn" data-action="timer-dismiss" title="Chiudi">✕</button>`;
+}
+
+function tickTimer() {
+  const tm = state && state.timer;
+  if (!tm) {
+    beepMark = null;
+    if (document.title !== 'Agenda del servizio') document.title = 'Agenda del servizio';
+    return;
+  }
+  const ms = timerMs();
+  document.querySelectorAll('.timer-clock').forEach(el => { el.textContent = fmtClock(ms); });
+  document.title = `⏱ ${fmtClock(ms)} · ${refInfo(tm.ref).label}`;
+  const mark = Math.floor(ms / 60000 / PAUSE_EVERY);
+  if (beepMark === null || beepMark > mark) beepMark = mark; // appena aperta la pagina: niente suono arretrato
+  else if (mark > beepMark) {
+    beepMark = mark;
+    if (state.settings.pauseBeep) { beep(); toast(`🔔 ${fmtDur(mark * PAUSE_EVERY)}: una pausa breve, se ti serve`); }
+  }
+}
+
+// Il cronometro a schermo intero: si può ridurre, continua a contare nella barra in fondo.
+function openTimerView() {
+  const tm = state.timer;
+  if (!tm) return;
+  const info = refInfo(tm.ref);
+  const tp = typeStyle(info.type);
+  const x = tm.step && allTasks().find(t => t.item.id === tm.step && taskTimerRef(t) === tm.ref);
   openModal(`
     <div class="focus">
-      <p class="eyebrow">Concentrazione · ${minutes} minuti</p>
-      <h2>${esc(label)}</h2>
-      <p class="muted">${esc(context)}</p>
-      <div class="focus-time" id="focus-time">${minutes}:00</div>
-      <p class="hint">Telefono lontano, TV spenta. Quando suona puoi fermarti, oppure continuare se sei in ritmo.</p>
+      <p class="eyebrow">⏱ Cronometro · partito alle ${new Date(tm.start).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })}</p>
+      <h2>${x ? esc(x.kind === 'step' ? x.item.label : x.item.title) : `${tp.icon} ${esc(info.label)}`}</h2>
+      ${x ? `<p class="muted">${tp.icon} ${esc(info.label)}</p>` : ''}
+      <div class="focus-time timer-clock">${fmtClock(timerMs())}</div>
+      <p class="hint">Telefono lontano, TV spenta. Quando fai una pausa premi Stop: il tempo viene salvato.</p>
       <div class="form-actions">
-        <button data-close>Interrompi</button>
-        <button class="primary" id="focus-done">✓ Fatto</button>
+        <button data-close>Riduci</button>
+        <button data-action="timer-stop">■ Stop</button>
+        ${x && !x.item.done ? `<button class="primary" data-action="timer-done">✓ Fatto · stop</button>` : ''}
       </div>
-    </div>`, root => {
-    const el = root.querySelector('#focus-time');
-    stopFocus();
-    const tick = () => {
-      const left = Math.max(0, end - Date.now());
-      const m = Math.floor(left / 60000), sec = Math.floor(left / 1000) % 60;
-      el.textContent = `${m}:${pad(sec)}`;
-      document.title = `${m}:${pad(sec)} · ${label}`;
-      if (!left) {
-        stopFocus();
-        el.textContent = 'Tempo! 🎉';
-        el.classList.add('over');
-        beep();
-        state.sessions = [...state.sessions, { at: new Date().toISOString(), minutes }].slice(-300);
-        save();
-      }
-    };
-    tick();
-    focusTimer = setInterval(tick, 1000);
-    root.querySelector('#focus-done').addEventListener('click', () => {
-      setDone(x.item, true);
-      save(); closeModal(); render();
-      toast('Fatto! Un passo in meno 💪');
+    </div>`);
+}
+
+// Su cosa lavori? Impegni delle prossime settimane, piani di studio, oppure altro.
+function openTimerPicker() {
+  const t = today();
+  const evs = state.events.filter(e => !e.notMine && !e.noPrep && e.steps.length && e.date >= t && e.date <= addDays(t, 35)).sort(byDate);
+  const studies = state.studies.filter(p => !isFinished(p));
+  const btn = (ref, icon, label, sub = '') => `
+    <li><button class="pick-btn" data-action="timer-start" data-ref="${esc(ref)}">${icon} <strong>${esc(label)}</strong>${sub ? ` <span class="muted">· ${sub}</span>` : ''}</button></li>`;
+  const cur = state.timer && refInfo(state.timer.ref);
+  openModal(`
+    <form class="form" id="timer-pick">
+      <h2>⏱ Su cosa lavori?</h2>
+      ${cur ? `<p class="hint warn">Stai già lavorando su <strong>${esc(cur.label)}</strong>: se scegli altro, quel tempo viene salvato.</p>` : ''}
+      ${evs.length ? `<h3>Impegni</h3><ul class="pick-list plain-pick">${evs.map(e => btn(`ev:${e.id}`, tpl(e.type).icon, e.title, `${esc(tpl(e.type).label)} · ${rel(e.date)}`)).join('')}</ul>` : ''}
+      ${studies.length ? `<h3>Studio personale</h3><ul class="pick-list plain-pick">${studies.map(p => btn(`study:${p.id}`, '📖', p.title)).join('')}</ul>` : ''}
+      <h3>Altro</h3>
+      <div class="inline-form">
+        <input name="other" placeholder="es. Lettura della Bibbia, preparazione canti…">
+        <button class="primary">▶ Inizia</button>
+      </div>
+    </form>`, form => {
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const label = form.elements.other.value.trim();
+      if (!label) return toast('Scrivi su cosa lavori');
+      closeModal();
+      startTimer(`other:${label}`);
+    });
+  });
+}
+
+// Dimenticato acceso? Oltre le 3 ore chiede conferma, una volta per ogni blocco di 3 ore.
+function checkLongTimer() {
+  const tm = state.timer;
+  if (!tm || modal.open) return;
+  const min = timerMs() / 60000;
+  const from = tm.checkedAt ? (Date.now() - new Date(tm.checkedAt)) / 60000 : min;
+  if (from < LONG_TIMER || longAsked === tm.start + (tm.checkedAt || '')) return;
+  longAsked = tm.start + (tm.checkedAt || '');
+  const startD = new Date(tm.start);
+  const local = d => `${iso(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  openModal(`
+    <form class="form">
+      <h2>⏱ Stai ancora lavorando?</h2>
+      <p>Il cronometro su <strong>${esc(refInfo(tm.ref).label)}</strong> gira da <strong>${fmtDur(min)}</strong>
+        (dalle ${startD.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })} di ${fmtWeekday(iso(startD))}).</p>
+      <label class="field"><span>Se avevi già finito, quando?</span>
+        <input type="datetime-local" name="end" min="${local(startD)}" max="${local(new Date())}" value="${local(new Date(Math.min(Date.now(), startD.getTime() + 3600000)))}"></label>
+      <div class="form-actions">
+        <button type="button" data-keep>Sì, continua</button>
+        <button class="primary">Avevo finito: salva fino a quell'ora</button>
+      </div>
+    </form>`, form => {
+    form.querySelector('[data-keep]').addEventListener('click', () => {
+      state.timer.checkedAt = new Date().toISOString();
+      save(); closeModal();
+    });
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const end = new Date(form.elements.end.value);
+      if (isNaN(end) || end <= startD) return toast('Scegli un orario dopo la partenza');
+      const m = stopTimer(end);
+      closeModal();
+      toast(`Salvati ${fmtDur(m)}`);
     });
   });
 }
@@ -2585,7 +2966,40 @@ document.addEventListener('click', e => {
     }
     case 'focus-start': {
       const x = taskFromRef(el);
-      if (x) openFocus(x, +(el.dataset.min || 25));
+      if (x) { startTimer(taskTimerRef(x), x.item.id); openTimerView(); }
+      break;
+    }
+    case 'timer-start': closeModal(); startTimer(el.dataset.ref); break;
+    case 'timer-pick': openTimerPicker(); break;
+    case 'timer-open': openTimerView(); break;
+    case 'timer-stop': {
+      const info = state.timer && refInfo(state.timer.ref);
+      const m = stopTimer();
+      if (modal.open && !modalRefresh) closeModal();
+      toast(m >= 1 ? `⏸ Salvati ${fmtDur(m)} su ${info.label}` : 'Cronometro fermato (meno di un minuto, non salvato)');
+      break;
+    }
+    case 'timer-done': {
+      const x = state.timer && allTasks().find(t => t.item.id === state.timer.step);
+      if (x) setDone(x.item, true);
+      const m = stopTimer();
+      closeModal();
+      toast(`Fatto! ${fmtDur(m)} salvati 💪`);
+      break;
+    }
+    case 'timer-resume': if (state.lastRef) startTimer(state.lastRef.ref, state.lastRef.step); break;
+    case 'timer-dismiss': state.lastRef = null; save(); renderTimer(); break;
+    case 'time-prev': timeWeek--; render(); break;
+    case 'time-next': timeWeek++; render(); break;
+    case 'time-today': timeWeek = 0; render(); break;
+    case 'session-add': openSessionForm(null); break;
+    case 'session-edit': openSessionForm(state.sessions.find(s => s.id === id)); break;
+    case 'session-delete': {
+      const s = state.sessions.find(x => x.id === id);
+      if (s && confirm(`Eliminare ${fmtDur(s.minutes)} su "${sessionInfo(s).label}"?`)) {
+        state.sessions = state.sessions.filter(x => x !== s);
+        save(); render();
+      }
       break;
     }
     case 'quick-done': {
@@ -2664,6 +3078,10 @@ document.addEventListener('change', e => {
     if (!p) return;
     setStudyProgress(p, el.checked ? studyStatus(p).target : progressBefore(p, today()));
     render();
+  } else if (el.id === 'pause-beep') {
+    state.settings.pauseBeep = el.checked;
+    save();
+    toast(el.checked ? `🔔 Suono ogni ${PAUSE_EVERY} minuti attivo` : 'Suono spento');
   } else if (el.id === 'import-file') {
     importData(el.files[0]);
     el.value = '';
@@ -2694,7 +3112,7 @@ document.addEventListener('submit', e => {
 // Se l'app resta aperta da un giorno all'altro, si aggiorna quando torni sulla finestra.
 window.addEventListener('focus', () => {
   if (!modal.open) render();
-  cloudRefresh();
+  cloudRefresh().then(checkLongTimer);
 });
 
 /* ---------- Avvio ---------- */
@@ -2719,6 +3137,8 @@ async function boot() {
   save();
   render();
   if (linked && !cloud.cfg) await cloudConnect(linked.token, linked.repo);
+  setInterval(tickTimer, 1000);
+  checkLongTimer();
   syncSheet({ silent: true });
 }
 
